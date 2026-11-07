@@ -1,0 +1,90 @@
+name: Проблема производительности
+description: Низкий FPS, статтеры, рваное время кадра, задержка ввода
+labels: [performance]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Производительность у нас — приоритет №1. Чтобы разобраться, нужны цифры: оверлей
+        RustDroid (FPS, 1% low, время кадра) и, по возможности, лог PresentMon.
+        Как снять лог: `docs/performance.md`, раздел «PresentMon».
+  - type: input
+    id: version
+    attributes:
+      label: Версия RustDroid
+    validations:
+      required: true
+  - type: input
+    id: os
+    attributes:
+      label: Windows (сборка)
+    validations:
+      required: true
+  - type: input
+    id: cpu
+    attributes:
+      label: CPU
+    validations:
+      required: true
+  - type: input
+    id: gpu
+    attributes:
+      label: GPU и версия драйвера
+    validations:
+      required: true
+  - type: input
+    id: display
+    attributes:
+      label: Монитор
+      placeholder: 2560x1440, 165 Гц, G-Sync включён
+  - type: input
+    id: game
+    attributes:
+      label: Игра (package name, версия) и сцена
+    validations:
+      required: true
+  - type: input
+    id: settings
+    attributes:
+      label: Настройки инстанса
+      placeholder: 6 ядер / 8 ГБ, 1920x1080, 120 Гц, VSync выкл., лимит 144
+  - type: textarea
+    id: numbers
+    attributes:
+      label: Цифры
+      description: Средний FPS, 1% low, время кадра (макс.), задержка ввода из оверлея
+      placeholder: |
+        Средний FPS: 58
+        1% low: 31
+        Время кадра (макс.): 70 мс
+    validations:
+      required: true
+  - type: dropdown
+    id: kind
+    attributes:
+      label: Характер проблемы
+      multiple: true
+      options:
+        - Низкий средний FPS
+        - Статтеры / фризы
+        - Статтер при первом появлении эффекта (компиляция шейдеров)
+        - Рваное время кадра при нормальном среднем FPS
+        - Большая задержка ввода
+        - Игра не открывает высокий FPS (90/120/144)
+  - type: textarea
+    id: presentmon
+    attributes:
+      label: Лог PresentMon (CSV)
+      description: Приложите файл или ссылку
+  - type: textarea
+    id: logs
+    attributes:
+      label: Логи RustDroid
+      render: text
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Проверки
+      options:
+        - label: Ноутбук подключён к сети, режим питания «Макс. производительность»
+        - label: В настройках выбран дискретный GPU (если он есть)

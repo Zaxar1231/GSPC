@@ -1,0 +1,63 @@
+name: Совместимость игры
+description: Игра не запускается, вылетает, рисуется с артефактами или не работает управление
+labels: [compat]
+body:
+  - type: input
+    id: game
+    attributes:
+      label: Игра
+      description: Название, package name, версия, источник (Play/APK/XAPK)
+      placeholder: Example Game, com.example.game 1.2.3, XAPK
+    validations:
+      required: true
+  - type: dropdown
+    id: abi
+    attributes:
+      label: Архитектура сборки игры
+      options:
+        - x86_64
+        - Только arm64 (через трансляцию)
+        - Не знаю
+    validations:
+      required: true
+  - type: dropdown
+    id: status
+    attributes:
+      label: Что происходит
+      options:
+        - Не устанавливается
+        - Вылетает при запуске
+        - Чёрный экран / зависание
+        - Графические артефакты
+        - Не работает управление / keymapping
+        - Нет звука
+        - Нет сети / не входит в аккаунт
+        - Игра сообщает об эмуляторе / античит
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Версия RustDroid и образа Android
+    validations:
+      required: true
+  - type: input
+    id: hw
+    attributes:
+      label: CPU / GPU (драйвер) / Windows
+    validations:
+      required: true
+  - type: textarea
+    id: details
+    attributes:
+      label: Подробности
+  - type: textarea
+    id: logs
+    attributes:
+      label: Логи (RustDroid и logcat из меню «Диагностика»)
+      render: text
+  - type: markdown
+    attributes:
+      value: |
+        Примечание: обход античитов и Play Integrity мы не делаем. Если игра блокирует
+        неcертифицированные устройства, issue закроется как «не планируется».

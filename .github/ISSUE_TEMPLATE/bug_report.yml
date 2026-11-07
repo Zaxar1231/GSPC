@@ -1,0 +1,86 @@
+name: Баг
+description: Что-то работает не так, как должно
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Спасибо за отчёт! Проверьте, нет ли уже такого issue. Проблемы с FPS и плавностью
+        лучше оформлять шаблоном «Проблема производительности», а проблемы конкретной игры —
+        шаблоном «Совместимость игры».
+  - type: input
+    id: version
+    attributes:
+      label: Версия RustDroid
+      description: Меню «О программе» или имя установщика
+      placeholder: 0.3.1 (stable)
+    validations:
+      required: true
+  - type: input
+    id: os
+    attributes:
+      label: Windows
+      description: "Win+R → winver: редакция и сборка"
+      placeholder: Windows 11 24H2 (26100.2033)
+    validations:
+      required: true
+  - type: input
+    id: cpu
+    attributes:
+      label: CPU
+      placeholder: Intel Core i7-13700H / AMD Ryzen 7 7840HS
+    validations:
+      required: true
+  - type: input
+    id: gpu
+    attributes:
+      label: GPU и версия драйвера
+      placeholder: NVIDIA RTX 4060 Laptop, 566.03
+    validations:
+      required: true
+  - type: input
+    id: ram
+    attributes:
+      label: ОЗУ хоста и настройки инстанса (ядра / RAM)
+      placeholder: 32 ГБ; инстанс 4 ядра / 6 ГБ
+  - type: input
+    id: game
+    attributes:
+      label: Игра / приложение (если связано)
+      placeholder: com.example.game 1.2.3
+  - type: textarea
+    id: what
+    attributes:
+      label: Что произошло
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Шаги воспроизведения
+      placeholder: |
+        1. ...
+        2. ...
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Ожидаемое поведение
+  - type: textarea
+    id: logs
+    attributes:
+      label: Логи
+      description: |
+        `%LOCALAPPDATA%\RustDroid\logs` (последний файл). Если был сбой — приложите dump из
+        `%LOCALAPPDATA%\RustDroid\crashes` или используйте кнопку «Отправить отчёт».
+      render: text
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Проверки
+      options:
+        - label: В Windows включён компонент «Платформа низкоуровневой оболочки Windows» (Windows Hypervisor Platform)
+          required: true
+        - label: Я проверил(а), что такого issue ещё нет
+          required: true
