@@ -1,0 +1,15 @@
+[package]
+name = "rustdroid-devices"
+description = "Виртуальные устройства RustDroid: virtio-blk, net, input, snd, vsock, console"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+publish.workspace = true
+
+[dependencies]
+
+[lints]
+workspace = true
