@@ -21,7 +21,7 @@ jobs:
       version: ${{ steps.meta.outputs.version }}
       prerelease: ${{ steps.meta.outputs.prerelease }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Версия из тега
         id: meta
@@ -79,7 +79,7 @@ jobs:
       # Этап 7: Velopack (vpk pack) — установщик Setup.exe, полные и дельта-пакеты, releases.*.json,
       # ed25519-подпись манифеста обновлений (секрет UPDATE_SIGNING_KEY).
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: release-files
           path: |
@@ -90,8 +90,8 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
         with:
           name: release-files
 
