@@ -1,0 +1,39 @@
+name: Запрос фичи
+description: Предложить новую возможность
+labels: [feature]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Какую задачу это решает
+      description: Опишите сценарий, а не только решение
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Предлагаемое решение
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Альтернативы, которые вы рассматривали
+  - type: dropdown
+    id: area
+    attributes:
+      label: Область
+      options:
+        - VMM / запуск инстанса
+        - Графика / FPS
+        - Ввод / keymapping
+        - Импорт BlueStacks
+        - Установщик / обновления
+        - UI
+        - Другое
+  - type: checkboxes
+    id: perf
+    attributes:
+      label: Производительность
+      options:
+        - label: Фича не должна влиять на FPS, время кадра и задержку ввода (или влияние описано выше)

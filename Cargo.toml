@@ -1,0 +1,105 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/whpx",
+    "crates/vmm",
+    "crates/virtio",
+    "crates/devices",
+    "crates/gpu",
+    "crates/present",
+    "crates/input",
+    "crates/hostinput",
+    "crates/bluestacks-import",
+    "crates/instance",
+    "crates/telemetry",
+    "crates/updater",
+    "crates/app",
+    "crates/guest-agent",
+    "xtask",
+]
+default-members = ["crates/app"]
+
+[workspace.package]
+version = "0.0.1"
+edition = "2024"
+rust-version = "1.99"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/Zaxar1231/GSPC"
+homepage = "https://github.com/Zaxar1231/GSPC"
+authors = ["RustDroid contributors"]
+publish = false
+
+[workspace.dependencies]
+# Внутренние крейты
+rustdroid-whpx = { path = "crates/whpx" }
+rustdroid-vmm = { path = "crates/vmm" }
+rustdroid-virtio = { path = "crates/virtio" }
+rustdroid-devices = { path = "crates/devices" }
+rustdroid-gpu = { path = "crates/gpu" }
+rustdroid-present = { path = "crates/present" }
+rustdroid-input = { path = "crates/input" }
+rustdroid-hostinput = { path = "crates/hostinput" }
+rustdroid-bluestacks-import = { path = "crates/bluestacks-import" }
+rustdroid-instance = { path = "crates/instance" }
+rustdroid-telemetry = { path = "crates/telemetry" }
+rustdroid-updater = { path = "crates/updater" }
+
+# Внешние зависимости (версии фиксируются только здесь)
+anyhow = "1"
+thiserror = "2"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "env-filter", "std", "ansi"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+criterion = { version = "0.8", default-features = false, features = ["cargo_bench_support"] }
+
+[workspace.lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+missing_docs = "warn"
+unreachable_pub = "warn"
+rust_2018_idioms = { level = "warn", priority = -1 }
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+# Каждый unsafe-блок обязан иметь комментарий `// SAFETY:`.
+undocumented_unsafe_blocks = "deny"
+multiple_unsafe_ops_per_block = "warn"
+# Никаких unwrap/expect/panic в рабочем коде (в тестах разрешено через clippy.toml).
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+todo = "deny"
+unimplemented = "deny"
+dbg_macro = "deny"
+print_stdout = "warn"
+print_stderr = "warn"
+# Горячие пути: замечаем лишние аллокации и копирования.
+large_stack_arrays = "warn"
+needless_collect = "warn"
+redundant_clone = "warn"
+
+[profile.dev]
+# Даже отладочная сборка VMM должна быть пригодна для запуска гостя.
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 3
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+debug = "line-tables-only" # символы для minidump и Tracy, на скорость не влияют
+split-debuginfo = "packed"  # .pdb отдельно, в установщик не попадает
+strip = "none"
+incremental = false
+
+# Профиль для профилирования (Tracy/PresentMon): как release, но с полными символами.
+[profile.profiling]
+inherits = "release"
+debug = "full"
+
+# Бенчмарки собираются с теми же флагами, что и релиз.
+[profile.bench]
+inherits = "release"
+debug = "line-tables-only"

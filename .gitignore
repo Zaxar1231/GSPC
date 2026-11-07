@@ -1,0 +1,39 @@
+# Rust
+/target/
+**/*.rs.bk
+*.pdb
+
+# Артефакты сборки и упаковки
+/dist/
+/releases/
+/installer/out/
+*.nupkg
+
+# Образы и данные гостя (скачиваются отдельно)
+/guest/out/
+/guest/cache/
+*.img
+*.qcow2
+*.rdsnap
+
+# Профилирование и бенчмарки
+*.tracy
+/benches/results/
+/presentmon-*.csv
+*.dmp
+
+# Секреты подписи
+*.pfx
+*.p12
+*.key
+minisign.key
+
+# IDE / ОС
+.vscode/*
+!.vscode/extensions.json
+!.vscode/settings.json
+.idea/
+*.iml
+.DS_Store
+Thumbs.db
+desktop.ini

@@ -1,0 +1,19 @@
+[package]
+name = "rustdroid-guest-agent"
+description = "Гостевой агент RustDroid (x86_64-linux-android): служебный канал через virtio-vsock"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "rustdroid-agent"
+path = "src/main.rs"
+
+[dependencies]
+
+[lints]
+workspace = true

@@ -1,0 +1,10 @@
+# Владелец по умолчанию для всего репозитория.
+*                       @Zaxar1231
+
+# Критичные по производительности и безопасности области.
+/crates/whpx/           @Zaxar1231
+/crates/vmm/            @Zaxar1231
+/crates/gpu/            @Zaxar1231
+/crates/present/        @Zaxar1231
+/.github/workflows/     @Zaxar1231
+/installer/             @Zaxar1231

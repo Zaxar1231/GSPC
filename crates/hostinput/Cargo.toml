@@ -1,0 +1,15 @@
+[package]
+name = "rustdroid-hostinput"
+description = "Хостовый ввод RustDroid: Raw Input, ClipCursor, XInput и геймпады"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+publish.workspace = true
+
+[dependencies]
+
+[lints]
+workspace = true

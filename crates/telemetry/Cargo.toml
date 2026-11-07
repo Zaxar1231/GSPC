@@ -1,0 +1,25 @@
+[package]
+name = "rustdroid-telemetry"
+description = "Метрики производительности, трассировка и отчёты о сбоях RustDroid"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+publish.workspace = true
+
+[dependencies]
+
+[dev-dependencies]
+criterion.workspace = true
+
+[lib]
+bench = false
+
+[[bench]]
+name = "frame_stats"
+harness = false
+
+[lints]
+workspace = true

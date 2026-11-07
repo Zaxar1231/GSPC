@@ -1,0 +1,15 @@
+[package]
+name = "rustdroid-vmm"
+description = "VMM RustDroid: vCPU, гостевая память, загрузчик ядра, прерывания, ACPI, PCI"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+publish.workspace = true
+
+[dependencies]
+
+[lints]
+workspace = true

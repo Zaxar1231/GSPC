@@ -1,0 +1,15 @@
+[package]
+name = "rustdroid-present"
+description = "D3D12-композитор RustDroid: flip-model swapchain, пейсинг кадров, оверлей"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+publish.workspace = true
+
+[dependencies]
+
+[lints]
+workspace = true

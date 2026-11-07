@@ -1,0 +1,23 @@
+[package]
+name = "rustdroid"
+description = "RustDroid — Android-эмулятор для игр на Windows 11"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "rustdroid"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+rustdroid-instance.workspace = true
+
+[lints]
+workspace = true
