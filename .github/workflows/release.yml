@@ -1,0 +1,119 @@
+name: Release
+
+# Тег vX.Y.Z → stable-релиз; vX.Y.Z-beta.N (любой тег с дефисом) → pre-release (канал beta).
+
+on:
+  push:
+    tags: ["v[0-9]+.[0-9]+.[0-9]+*"]
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    runs-on: windows-latest
+    env:
+      HAS_CERT: ${{ secrets.WINDOWS_CERT_PFX_BASE64 != '' }}
+    outputs:
+      version: ${{ steps.meta.outputs.version }}
+      prerelease: ${{ steps.meta.outputs.prerelease }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Версия из тега
+        id: meta
+        shell: pwsh
+        run: |
+          $tag = "${{ github.ref_name }}"
+          $version = $tag.TrimStart('v')
+          $pre = if ($version.Contains('-')) { 'true' } else { 'false' }
+          $cargo = (Select-String -Path Cargo.toml -Pattern '^version = "(.+)"' | Select-Object -First 1).Matches.Groups[1].Value
+          $core = $version.Split('-')[0]
+          if ($cargo -ne $core -and $cargo -ne $version) {
+            Write-Error "Версия в Cargo.toml ($cargo) не совпадает с тегом ($tag)"
+            exit 1
+          }
+          "version=$version" >> $env:GITHUB_OUTPUT
+          "prerelease=$pre" >> $env:GITHUB_OUTPUT
+
+      - run: rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Тесты
+        run: cargo test --workspace --locked
+
+      - name: Release-сборка
+        run: cargo build --release --locked -p rustdroid
+
+      # Подпись Authenticode. Включится сама, когда в секретах появятся
+      # WINDOWS_CERT_PFX_BASE64 и WINDOWS_CERT_PASSWORD.
+      - name: Подпись Authenticode
+        if: ${{ env.HAS_CERT == 'true' }}
+        env:
+          CERT_B64: ${{ secrets.WINDOWS_CERT_PFX_BASE64 }}
+          CERT_PASSWORD: ${{ secrets.WINDOWS_CERT_PASSWORD }}
+        shell: pwsh
+        run: |
+          $pfx = Join-Path $env:RUNNER_TEMP 'cert.pfx'
+          [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String($env:CERT_B64))
+          $signtool = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin\*\x64\signtool.exe" | Sort-Object FullName -Descending | Select-Object -First 1
+          & $signtool.FullName sign /fd SHA256 /td SHA256 /tr http://timestamp.digicert.com /f $pfx /p $env:CERT_PASSWORD target\release\rustdroid.exe
+          Remove-Item $pfx
+
+      - name: Упаковка
+        shell: pwsh
+        run: |
+          $v = "${{ steps.meta.outputs.version }}"
+          New-Item -ItemType Directory -Force dist | Out-Null
+          Copy-Item target\release\rustdroid.exe dist\
+          Copy-Item README.md, README.en.md, LICENSE-MIT, LICENSE-APACHE, CHANGELOG.md dist\
+          Compress-Archive -Path dist\* -DestinationPath "RustDroid-$v-win-x64-portable.zip"
+          Compress-Archive -Path target\release\rustdroid.pdb -DestinationPath "RustDroid-$v-win-x64-symbols.zip"
+          Get-ChildItem RustDroid-*.zip | ForEach-Object {
+            "$((Get-FileHash $_ -Algorithm SHA256).Hash.ToLower())  $($_.Name)"
+          } | Set-Content -Encoding ascii SHA256SUMS.txt
+
+      # Этап 7: Velopack (vpk pack) — установщик Setup.exe, полные и дельта-пакеты, releases.*.json,
+      # ed25519-подпись манифеста обновлений (секрет UPDATE_SIGNING_KEY).
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-files
+          path: |
+            RustDroid-*.zip
+            SHA256SUMS.txt
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-files
+
+      - name: Changelog для версии
+        env:
+          VERSION: ${{ needs.build.outputs.version }}
+        run: |
+          awk -v v="$VERSION" '
+            $0 ~ "^## \\[" v "\\]" {found=1; next}
+            found && /^## \[/ {exit}
+            found {print}
+          ' CHANGELOG.md > RELEASE_NOTES.md
+          if [ ! -s RELEASE_NOTES.md ]; then
+            echo "В CHANGELOG.md нет раздела [$VERSION]" >&2
+            exit 1
+          fi
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          name: RustDroid ${{ needs.build.outputs.version }}
+          body_path: RELEASE_NOTES.md
+          prerelease: ${{ needs.build.outputs.prerelease == 'true' }}
+          files: |
+            RustDroid-*.zip
+            SHA256SUMS.txt

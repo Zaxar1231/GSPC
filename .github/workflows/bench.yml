@@ -1,0 +1,72 @@
+name: Benchmarks
+
+# Бенчмарки гоняются на self-hosted раннере (ноутбук с GPU) только по запросу:
+# - вручную (workflow_dispatch);
+# - на PR с меткой `run-bench`, поставленной мейнтейнером.
+# Микробенчмарки на общих GitHub-раннерах слишком шумные для порога в несколько процентов.
+#
+# Метки раннера: self-hosted, windows, x64, gpu. Регистрация описана в docs/performance.md.
+
+on:
+  workflow_dispatch:
+    inputs:
+      base_ref:
+        description: "Ветка/коммит базовой линии"
+        default: main
+        required: true
+      threshold:
+        description: "Порог регрессии, %"
+        default: "5"
+        required: true
+  pull_request:
+    types: [labeled, synchronize]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: bench-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  bench:
+    # Только для PR из этого репозитория и только с меткой run-bench: чужой код на домашнем
+    # self-hosted раннере не запускаем.
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.pull_request.head.repo.full_name == github.repository &&
+       contains(github.event.pull_request.labels.*.name, 'run-bench'))
+    runs-on: [self-hosted, windows, x64, gpu]
+    timeout-minutes: 60
+    env:
+      BASE_REF: ${{ inputs.base_ref || github.event.pull_request.base.sha }}
+      THRESHOLD: ${{ inputs.threshold || '5' }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Базовая линия
+        shell: pwsh
+        run: |
+          git checkout --quiet $env:BASE_REF
+          cargo bench --workspace --bench '*' --locked -- --save-baseline base --noplot
+          git checkout --quiet $env:GITHUB_SHA
+
+      - name: Текущая версия против базовой линии
+        shell: pwsh
+        run: cargo bench --workspace --bench '*' --locked -- --baseline base --noplot
+
+      - name: Проверка порога регрессии
+        shell: pwsh
+        run: cargo xtask bench-check --threshold $env:THRESHOLD
+
+      # Начиная с этапа 3 здесь же: сценарии-снапшоты игр + PresentMon (FPS, 1% low, время кадра,
+      # задержка ввода) с тем же порогом. См. docs/performance.md.
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: criterion-report
+          path: target/criterion
+          retention-days: 14
