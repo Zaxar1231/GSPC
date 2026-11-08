@@ -82,6 +82,10 @@ pub(crate) struct VmArgs {
     /// Не показывать оверлей производительности.
     #[arg(long)]
     pub no_overlay: bool,
+
+    /// Остановить ВМ через N секунд (0 — не останавливать). Для автоматических проверок.
+    #[arg(long, default_value_t = 0)]
+    pub timeout: u64,
 }
 
 /// Разобранный режим `--display`.

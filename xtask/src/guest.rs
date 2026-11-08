@@ -59,6 +59,54 @@ fn download(url: &str, dest: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Скачивает текст по `url` (через `curl`).
+fn fetch_text(url: &str) -> Result<String> {
+    let out = Command::new("curl")
+        .args(["-fsSL", "--retry", "3", url])
+        .output()
+        .context("не удалось запустить curl")?;
+    if !out.status.success() {
+        bail!("запрос {url} не удался: {}", out.status);
+    }
+    String::from_utf8(out.stdout).context("ответ не в UTF-8")
+}
+
+/// Номер последней удачной сборки таргета из `status.json` ветки ci.android.com.
+fn last_good_build(status_json: &str, target: &str) -> Result<String> {
+    let v: serde_json::Value = serde_json::from_str(status_json).context("разбор status.json")?;
+    let build = v
+        .get("targets")
+        .and_then(serde_json::Value::as_array)
+        .and_then(|ts| {
+            ts.iter()
+                .find(|t| t.get("name").and_then(serde_json::Value::as_str) == Some(target))
+        })
+        .and_then(|t| t.get("last_known_good_build"))
+        .and_then(serde_json::Value::as_str)
+        .with_context(|| format!("в status.json нет таргета {target}"))?;
+    if build.is_empty() || build == "0" || !build.chars().all(|c| c.is_ascii_digit()) {
+        bail!("у таргета {target} нет удачных сборок");
+    }
+    Ok(build.to_owned())
+}
+
+/// Разрешает `latest` в номер последней удачной сборки, остальное возвращает как есть.
+fn resolve_build(build: String, branch: &str, target: &str) -> Result<String> {
+    if build != "latest" {
+        return Ok(build);
+    }
+    let url = format!("https://ci.android.com/builds/branches/{branch}/status.json");
+    let id = last_good_build(&fetch_text(&url)?, target)?;
+    println!("последняя удачная сборка {branch}/{target}: {id}");
+    Ok(id)
+}
+
+fn is_valid_name(s: &str) -> bool {
+    !s.is_empty()
+        && s.chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-' || c == '.')
+}
+
 fn fetch_verified(url: &str, dest: &Path, sha256: Option<&str>) -> Result<Vec<u8>> {
     if let Ok(existing) = fs::read(dest)
         && sha256.is_none_or(|h| sha256_hex(&existing) == h)
@@ -79,7 +127,7 @@ fn fetch_verified(url: &str, dest: &Path, sha256: Option<&str>) -> Result<Vec<u8
     Ok(data)
 }
 
-/// `cargo xtask guest-fetch --kernel-build <ID> [--sha256 <hex>]`.
+/// `cargo xtask guest-fetch --kernel-build <ID|latest> [--sha256 <hex>]`.
 pub(crate) fn fetch_kernel(args: &[String]) -> Result<()> {
     let mut build = None;
     let mut sha = None;
@@ -95,10 +143,11 @@ pub(crate) fn fetch_kernel(args: &[String]) -> Result<()> {
         build.filter(|b| !b.is_empty() && b.chars().all(|c| c.is_ascii_alphanumeric()))
     else {
         bail!(
-            "укажите --kernel-build <ID>: номер сборки ветки {KERNEL_BRANCH}, таргет {KERNEL_TARGET} \
-             на https://ci.android.com (см. docs/guest-image.md)"
+            "укажите --kernel-build <ID|latest>: номер сборки ветки {KERNEL_BRANCH}, таргет \
+             {KERNEL_TARGET} на https://ci.android.com (см. docs/guest-image.md)"
         );
     };
+    let build = resolve_build(build, KERNEL_BRANCH, KERNEL_TARGET)?;
     let dir = cache_dir();
     fs::create_dir_all(&dir)?;
     let url = format!(
@@ -116,20 +165,24 @@ pub(crate) fn fetch_kernel(args: &[String]) -> Result<()> {
     Ok(())
 }
 
+/// Ветка ci.android.com с образами Cuttlefish по умолчанию (публичная, последний релиз AOSP).
+const CF_BRANCH: &str = "aosp-android-latest-release";
 /// Таргет Cuttlefish x86_64 по умолчанию (имя таргета зависит от ветки ci.android.com).
-const CF_TARGET: &str = "aosp_cf_x86_64_phone-trunk_staging-userdebug";
+const CF_TARGET: &str = "aosp_cf_x86_64_only_phone-userdebug";
 
-/// `cargo xtask cf-fetch --build <ID> [--target <TARGET>] [--sha256 <hex>]`: образы Cuttlefish
-/// (`*-img-<ID>.zip`) в `guest/cache/cf-<ID>/`.
+/// `cargo xtask cf-fetch --build <ID|latest> [--branch <BRANCH>] [--target <TARGET>]
+/// [--sha256 <hex>]`: образы Cuttlefish (`*-img-<ID>.zip`) в `guest/cache/cf-<ID>/`.
 pub(crate) fn fetch_cuttlefish(args: &[String]) -> Result<()> {
     let mut build = None;
     let mut target = CF_TARGET.to_owned();
+    let mut branch = CF_BRANCH.to_owned();
     let mut sha = None;
     let mut it = args.iter();
     while let Some(a) = it.next() {
         match a.as_str() {
             "--build" => build = it.next().cloned(),
             "--target" => target = it.next().cloned().context("--target требует значение")?,
+            "--branch" => branch = it.next().cloned().context("--branch требует значение")?,
             "--sha256" => sha = it.next().cloned(),
             other => bail!("неизвестный аргумент: {other}"),
         }
@@ -138,15 +191,14 @@ pub(crate) fn fetch_cuttlefish(args: &[String]) -> Result<()> {
         build.filter(|b| !b.is_empty() && b.chars().all(|c| c.is_ascii_alphanumeric()))
     else {
         bail!(
-            "укажите --build <ID>: номер сборки таргета {target} на https://ci.android.com (см. docs/stage-2.md)"
+            "укажите --build <ID|latest>: номер сборки таргета {target} на https://ci.android.com \
+             (см. docs/stage-2.md)"
         );
     };
-    if !target
-        .chars()
-        .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
-    {
-        bail!("некорректное имя таргета: {target}");
+    if !is_valid_name(&target) || !is_valid_name(&branch) {
+        bail!("некорректное имя ветки или таргета: {branch} / {target}");
     }
+    let build = resolve_build(build, &branch, &target)?;
     let product = target.split('-').next().unwrap_or("aosp_cf_x86_64_phone");
     let dir = cache_dir().join(format!("cf-{build}"));
     fs::create_dir_all(&dir)?;
@@ -213,6 +265,20 @@ pub(crate) fn busybox_initramfs(args: &[String]) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn last_good_build_finds_target() {
+        let json = r#"{"targets":[
+            {"name":"a","last_known_good_build":"1"},
+            {"name":"kernel_virt_x86_64","last_known_good_build":"16864189"},
+            {"name":"z","last_known_good_build":"0"}]}"#;
+        assert_eq!(
+            last_good_build(json, "kernel_virt_x86_64").unwrap(),
+            "16864189"
+        );
+        assert!(last_good_build(json, "z").is_err());
+        assert!(last_good_build(json, "missing").is_err());
+    }
 
     #[test]
     fn sha256_known_vector() {

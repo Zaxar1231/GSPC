@@ -5,10 +5,10 @@
 //! - `cargo xtask bench-check [--threshold <проценты>] [--dir <каталог criterion>]` —
 //!   проверяет результаты `cargo bench -- --baseline <имя>` и падает, если среднее время
 //!   любого бенчмарка выросло больше порога (по умолчанию 5 %);
-//! - `cargo xtask guest-fetch --kernel-build <ID>` — скачать ядро GKI (android15-6.6,
+//! - `cargo xtask guest-fetch --kernel-build <ID|latest>` — скачать ядро GKI (android15-6.6,
 //!   `kernel_virt_x86_64`) с ci.android.com в `guest/cache/`;
 //! - `cargo xtask busybox-initramfs` — собрать initramfs с busybox для проверки этапа 1;
-//! - `cargo xtask cf-fetch --build <ID>` — скачать и распаковать образы Cuttlefish x86_64.
+//! - `cargo xtask cf-fetch --build <ID|latest>` — скачать и распаковать образы Cuttlefish x86_64.
 
 #![allow(
     clippy::print_stdout,
@@ -37,8 +37,8 @@ fn main() -> Result<()> {
         _ => {
             eprintln!(
                 "использование: cargo xtask <ci | bench-check [--threshold N] [--dir PATH] | \
-                 guest-fetch --kernel-build ID [--sha256 HEX] | busybox-initramfs [--out PATH] | \
-                 cf-fetch --build ID [--target T] [--sha256 HEX]>"
+                 guest-fetch --kernel-build ID|latest [--sha256 HEX] | busybox-initramfs [--out PATH] | \
+                 cf-fetch --build ID|latest [--branch B] [--target T] [--sha256 HEX]>"
             );
             bail!("неизвестная команда")
         }

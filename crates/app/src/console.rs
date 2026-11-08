@@ -165,6 +165,18 @@ fn spawn_input(target: InputTarget, stopper: Stopper) -> std::io::Result<()> {
     Ok(())
 }
 
+/// Останавливает ВМ через `secs` секунд (`--timeout`).
+fn spawn_timeout(secs: u64, stopper: Stopper) -> std::io::Result<()> {
+    std::thread::Builder::new()
+        .name("vm-timeout".into())
+        .spawn(move || {
+            std::thread::sleep(std::time::Duration::from_secs(secs));
+            tracing::info!(secs, "истёк --timeout, ВМ останавливается");
+            stopper.stop();
+        })?;
+    Ok(())
+}
+
 fn open_log(path: Option<&PathBuf>) -> Result<ConsoleOut> {
     let log = path
         .map(|p| File::create(p).with_context(|| format!("не удалось создать {}", p.display())))
@@ -210,6 +222,9 @@ fn run_vm(cfg: &VmConfig, mut devices: VmDevices, vm: &VmArgs) -> Result<()> {
     };
     let raw = RawConsole::enable();
     spawn_input(target, machine.stopper()).context("не удалось запустить поток ввода")?;
+    if vm.timeout > 0 {
+        spawn_timeout(vm.timeout, machine.stopper()).context("не удалось запустить таймер")?;
+    }
     let result = match screen {
         Some(screen) => display::run(machine, screen, vm),
         None => machine.run().map_err(anyhow::Error::from),
