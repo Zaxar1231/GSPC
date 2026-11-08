@@ -239,7 +239,12 @@ const SLOTTED: &[&str] = &[
     "vbmeta_system_dlkm",
     "vbmeta_vendor_dlkm",
 ];
-const SHARED: &[&str] = &["super", "userdata"];
+/// Размер пустого раздела `userdata`, если образа нет или он слишком мал.
+pub const USERDATA_SIZE: u64 = 8 << 30;
+/// Образ `userdata` меньше этого размера считается заготовкой: в архивах Cuttlefish он занимает
+/// несколько МиБ, и его расширяет `launch_cvd`. Вместо него даётся пустой раздел
+/// [`USERDATA_SIZE`], который Android форматирует сам (флаг `formattable` в fstab).
+const USERDATA_MIN_IMAGE: u64 = 256 << 20;
 
 /// План разделов по каталогу образов: слотовые разделы `_a`, `super`, `userdata`, плюс пустые
 /// `misc` (1 МиБ) и `metadata` (64 МиБ), которые Android форматирует сам.
@@ -269,15 +274,18 @@ pub fn partition_plan(dir: &Path) -> Result<Vec<PartitionPlan>, AndroidError> {
             });
         }
     }
-    for n in SHARED {
-        if let Some(p) = exists(n) {
-            plan.push(PartitionPlan {
-                name: (*n).to_owned(),
-                image: Some(p),
-                empty_size: 0,
-            });
-        }
-    }
+    plan.push(PartitionPlan {
+        name: "super".into(),
+        image: exists("super"),
+        empty_size: 0,
+    });
+    let userdata = exists("userdata")
+        .filter(|p| std::fs::metadata(p).is_ok_and(|m| m.len() >= USERDATA_MIN_IMAGE));
+    plan.push(PartitionPlan {
+        name: "userdata".into(),
+        empty_size: if userdata.is_some() { 0 } else { USERDATA_SIZE },
+        image: userdata,
+    });
     plan.push(PartitionPlan {
         name: "metadata".into(),
         image: None,
@@ -296,11 +304,19 @@ pub fn rustdroid_bootconfig(vendor: &str, boot_device: &str, console: &str) -> B
     bc.set("androidboot.slot_suffix", "_a");
     bc.set("androidboot.force_normal_boot", "1");
     bc.set("androidboot.verifiedbootstate", "orange");
+    // Разблокированное состояние AVB: ошибки проверки vbmeta не блокируют загрузку.
+    bc.set("androidboot.vbmeta.device_state", "unlocked");
+    bc.set("androidboot.setupwizard_mode", "DISABLED");
     bc.set("androidboot.serialno", "RUSTDROID0001");
     bc.set("androidboot.console", console);
     bc.set("androidboot.selinux", "permissive");
     if bc.get("androidboot.hardware").is_none() {
         bc.set("androidboot.hardware", "cutf_cvm");
+    }
+    // Первый этап init ищет `fstab.<suffix>`: у Cuttlefish в vendor ramdisk лежат только
+    // `fstab.cf.*`, суффикс задаёт launch_cvd. userdata — f2fs, шифрование имён — HCTR2.
+    if bc.get("androidboot.fstab_suffix").is_none() {
+        bc.set("androidboot.fstab_suffix", "cf.f2fs.hctr2");
     }
     bc
 }
@@ -391,6 +407,8 @@ mod tests {
         );
         assert_eq!(bc.get("androidboot.console"), Some("ttyS0"));
         assert_eq!(bc.get("androidboot.hardware"), Some("cutf_cvm"));
+        assert_eq!(bc.get("androidboot.fstab_suffix"), Some("cf.f2fs.hctr2"));
+        assert_eq!(bc.get("androidboot.vbmeta.device_state"), Some("unlocked"));
         let text = bc.render();
         assert_eq!(text.matches("androidboot.console").count(), 1);
         assert!(text.contains("androidboot.boot_devices = \"pci0000:00/0000:00:01.0\"\n"));
@@ -430,6 +448,10 @@ mod tests {
         }
         let plan = partition_plan(&dir).unwrap();
         let names: Vec<_> = plan.iter().map(|p| p.name.as_str()).collect();
+        // Крошечный userdata.img (заготовка Cuttlefish) заменяется пустым разделом.
+        let userdata = plan.iter().find(|p| p.name == "userdata").unwrap();
+        assert_eq!(userdata.image, None);
+        assert_eq!(userdata.empty_size, USERDATA_SIZE);
         assert_eq!(
             names,
             [
