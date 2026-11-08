@@ -16,9 +16,10 @@ keymapping уровня BlueStacks. Производительность — п�
 </div>
 
 > [!WARNING]
-> Проект на ранней стадии (этап 2: virtio и загрузка Android до шелла). Можно загрузить ядро
-> Linux с initramfs ([docs/stage-1.md](docs/stage-1.md)) и Android из образов Cuttlefish
-> ([docs/stage-2.md](docs/stage-2.md)) — пока в консоли. Окно с экраном появится на этапе 3.
+> Проект на ранней стадии (этап 3: экран и ввод). Можно загрузить ядро Linux
+> ([docs/stage-1.md](docs/stage-1.md)) и Android из образов Cuttlefish
+> ([docs/stage-2.md](docs/stage-2.md)) — в консоли или в окне с экраном, мышью и оверлеем
+> ([docs/stage-3.md](docs/stage-3.md)). 3D на видеокарте хоста — этап 4.
 
 ![Скриншот (заглушка)](docs/assets/screenshot-placeholder.svg)
 
@@ -75,6 +76,8 @@ Android из образов Cuttlefish (этап 2), подробно в [docs/s
 ```powershell
 cargo xtask cf-fetch --build <НОМЕР_СБОРКИ>
 .\target\release\rustdroid.exe boot-android --images guest\cache\cf-<НОМЕР_СБОРКИ> --memory 4096 --cpus 2
+# с окном, мышью и оверлеем (этап 3):
+.\target\release\rustdroid.exe boot-android --images guest\cache\cf-<НОМЕР_СБОРКИ> --memory 4096 --cpus 4 --display 1920x1080@120
 ```
 
 Выход из консоли гостя: `Ctrl+A`, затем `X`.
@@ -159,8 +162,8 @@ Hyper-V), перестанут запускаться или будут рабо
 |---|---|---|
 | 0 | Репозиторий, workspace, CI, документация | ✅ |
 | 1 | Минимальный VMM на WHPX: ядро Linux + initramfs, serial-консоль | ✅ (ждёт проверки на железе) |
-| 2 | virtio-pci/MSI-X, virtio-blk, virtio-console: AOSP до шелла | 🚧 |
-| 3 | virtio-gpu 2D, D3D12-композитор, virtio-input, оверлей производительности | ⏳ |
+| 2 | virtio-pci/MSI-X, virtio-blk, virtio-console: AOSP до шелла | ✅ (ждёт проверки на железе) |
+| 3 | virtio-gpu 2D, D3D12-композитор, virtio-input, оверлей производительности | 🚧 |
 | 4 | 3D: gfxstream + ANGLE-on-Vulkan | ⏳ |
 | 5 | virtio-net (NAT), virtio-vsock, гостевой агент | ⏳ |
 | 6 | Keymapping, профили, редактор | ⏳ |

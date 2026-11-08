@@ -10,6 +10,18 @@
 
 ### Added
 
+- Этап 3: экран и ввод.
+  - virtio-gpu 2D: ресурсы, backing, transfer, scanout, flush, фенсы; EDID (CVT-RB) с частотой
+    дисплея гостя 60–144+ Гц.
+  - Почтовый ящик кадров с пулом буферов и пробуждением композитора по `RESOURCE_FLUSH`.
+  - virtio-input: мультитач (протокол B, `INPUT_PROP_DIRECT`) и клавиатура; таблица скан-кодов
+    Windows → коды Linux.
+  - D3D12-композитор: flip model, waitable swapchain, задержка 1 кадр, tearing/VRR, лимит FPS,
+    самый производительный адаптер.
+  - Окно Win32 с DPI awareness v2, мышь как касание, клавиатура; UI отделён от потока вывода.
+  - Оверлей: FPS, 1% low, время кадра, задержка flush → present, график времени кадра.
+  - Экспорт `NvOptimusEnablement` / `AmdPowerXpressRequestHighPerformance`.
+  - `boot`/`boot-android --display ШxВ@ГЦ --no-vsync --fps-limit --no-overlay --set КЛЮЧ=ЗНАЧЕНИЕ`.
 - Этап 2: virtio и загрузка Android.
   - PCI: ECAM, ACPI MCFG, корневой мост `PCI0` в DSDT, предназначенные BAR.
   - `rustdroid-virtio`: split virtqueue (EVENT_IDX, indirect), MSI-X (маски, PBA), транспорт
