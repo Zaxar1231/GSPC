@@ -19,6 +19,11 @@
   `userdata.img` в архивах Cuttlefish — Android sparse. Добавлен `SparseDisk`: чтение sparse-образов
   без распаковки, индекс чанков строится за доли миллисекунды.
 - Окно до первого кадра гостя было белым, теперь чёрное.
+- Android 17 перезагружался с `bootstrap-apexd-failed`: у Cuttlefish часть HAL поставляется
+  несколькими вариантами одного APEX, и выбор задаёт `launch_cvd`. Теперь bootconfig по
+  умолчанию выбирает `gatekeeper.nonsecure`, `keymint.rust_nonsecure`, `composer.ranchu` и
+  базовый HAL камеры (`androidboot.vendor.apex.*`). В режиме окна добавлены
+  `androidboot.cpuvulkan.version` и `androidboot.lcd_density`.
 
 ### Added
 

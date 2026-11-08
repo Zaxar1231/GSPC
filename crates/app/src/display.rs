@@ -31,6 +31,9 @@ pub(crate) const GUEST_SWIFTSHADER: &[(&str, &str)] = &[
     ("androidboot.hardware.egl", "angle"),
     ("androidboot.hardware.vulkan", "pastel"),
     ("androidboot.opengles.version", "196609"),
+    // Vulkan 1.2 в SwiftShader (pastel), как у Cuttlefish в режиме guest_swiftshader.
+    ("androidboot.cpuvulkan.version", "4202496"),
+    ("androidboot.lcd_density", "240"),
 ];
 
 /// Экран, подключённый к ВМ.

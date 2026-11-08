@@ -294,6 +294,26 @@ pub fn partition_plan(dir: &Path) -> Result<Vec<PartitionPlan>, AndroidError> {
     Ok(plan)
 }
 
+/// Выбор вариантов APEX с несколькими установленными версиями (`ro.boot.vendor.apex.*`).
+pub const VENDOR_APEX_DEFAULTS: &[(&str, &str)] = &[
+    (
+        "com.android.hardware.gatekeeper",
+        "com.android.hardware.gatekeeper.nonsecure",
+    ),
+    (
+        "com.android.hardware.keymint",
+        "com.android.hardware.keymint.rust_nonsecure",
+    ),
+    (
+        "com.android.hardware.graphics.composer",
+        "com.android.hardware.graphics.composer.ranchu",
+    ),
+    (
+        "com.google.emulated.camera.provider.hal",
+        "com.google.emulated.camera.provider.hal",
+    ),
+];
+
 /// Параметры bootconfig RustDroid поверх vendor bootconfig.
 ///
 /// `boot_device` — путь PCI диска с разделами, например `pci0000:00/0000:00:01.0`.
@@ -312,6 +332,16 @@ pub fn rustdroid_bootconfig(vendor: &str, boot_device: &str, console: &str) -> B
     bc.set("androidboot.selinux", "permissive");
     if bc.get("androidboot.hardware").is_none() {
         bc.set("androidboot.hardware", "cutf_cvm");
+    }
+    // У Cuttlefish часть HAL поставляется несколькими вариантами одного APEX; без выбора
+    // apexd-bootstrap падает и Android перезагружается (`bootstrap-apexd-failed`). Значение —
+    // имя файла без `.apex`. Варианты `cf_remote`/`trusty` требуют хостовых сервисов
+    // Cuttlefish, которых у нас нет.
+    for (module, choice) in VENDOR_APEX_DEFAULTS {
+        let key = format!("androidboot.vendor.apex.{module}");
+        if bc.get(&key).is_none() {
+            bc.set(&key, choice);
+        }
     }
     // Первый этап init ищет `fstab.<suffix>`: у Cuttlefish в vendor ramdisk лежат только
     // `fstab.cf.*`, суффикс задаёт launch_cvd. userdata — f2fs, шифрование имён — HCTR2.
@@ -408,6 +438,14 @@ mod tests {
         assert_eq!(bc.get("androidboot.console"), Some("ttyS0"));
         assert_eq!(bc.get("androidboot.hardware"), Some("cutf_cvm"));
         assert_eq!(bc.get("androidboot.fstab_suffix"), Some("cf.f2fs.hctr2"));
+        assert_eq!(
+            bc.get("androidboot.vendor.apex.com.android.hardware.gatekeeper"),
+            Some("com.android.hardware.gatekeeper.nonsecure")
+        );
+        assert_eq!(
+            bc.get("androidboot.vendor.apex.com.android.hardware.graphics.composer"),
+            Some("com.android.hardware.graphics.composer.ranchu")
+        );
         assert_eq!(bc.get("androidboot.vbmeta.device_state"), Some("unlocked"));
         let text = bc.render();
         assert_eq!(text.matches("androidboot.console").count(), 1);
