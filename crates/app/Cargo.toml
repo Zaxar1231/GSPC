@@ -9,6 +9,8 @@ repository.workspace = true
 authors.workspace = true
 publish.workspace = true
 
+build = "build.rs"
+
 [[bin]]
 name = "rustdroid"
 path = "src/main.rs"
@@ -21,6 +23,9 @@ tracing-subscriber.workspace = true
 
 [target.'cfg(windows)'.dependencies]
 rustdroid-devices.workspace = true
+rustdroid-gpu.workspace = true
+rustdroid-input.workspace = true
+rustdroid-present.workspace = true
 rustdroid-instance.workspace = true
 rustdroid-vmm.workspace = true
 rustdroid-whpx.workspace = true

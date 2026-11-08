@@ -1,4 +1,4 @@
-//! Запуск ВМ с консолью гостя в терминале Windows: `boot` и `boot-android`.
+//! Запуск ВМ: консоль гостя в терминале Windows и, с `--display`, окно с экраном гостя.
 
 use std::fs::File;
 use std::io::{Read, Write};
@@ -22,7 +22,8 @@ use windows::Win32::System::Console::{
     GetStdHandle, STD_INPUT_HANDLE, STD_OUTPUT_HANDLE, SetConsoleMode,
 };
 
-use crate::cli::{AndroidArgs, BootArgs, ConsoleKind, DiskSpec, VmArgs};
+use crate::cli::{AndroidArgs, BootArgs, ConsoleKind, DiskSpec, DisplaySpec, VmArgs};
+use crate::display;
 
 /// Префикс управляющих комбинаций (как в QEMU): Ctrl+A.
 const ESCAPE: u8 = 0x01;
@@ -191,9 +192,17 @@ fn run_vm(cfg: &VmConfig, mut devices: VmDevices, vm: &VmArgs) -> Result<()> {
     if vm.console == ConsoleKind::Hvc {
         devices.console = Some((Box::new(out.clone()), Arc::new(ConsoleInput::default())));
     }
+    let display = vm
+        .display
+        .as_deref()
+        .map(DisplaySpec::parse)
+        .transpose()
+        .map_err(anyhow::Error::msg)?;
+    let screen = display.map(|d| display::attach(&mut devices, d));
+
     let machine = Vm::new(cfg, devices, Box::new(out)).context("не удалось создать ВМ")?;
     tracing::info!(cmdline = machine.cmdline(), "командная строка ядра");
-    tracing::info!("Консоль гостя ниже. Выход: Ctrl+A, затем X.");
+    tracing::info!("Консоль гостя ниже. Выход: Ctrl+A, затем X (или закройте окно).");
 
     let target = match (vm.console, machine.console()) {
         (ConsoleKind::Hvc, Some(h)) => InputTarget::Hvc(h),
@@ -201,9 +210,13 @@ fn run_vm(cfg: &VmConfig, mut devices: VmDevices, vm: &VmArgs) -> Result<()> {
     };
     let raw = RawConsole::enable();
     spawn_input(target, machine.stopper()).context("не удалось запустить поток ввода")?;
-    let (outcome, stats) = machine.run().context("ошибка выполнения ВМ")?;
+    let result = match screen {
+        Some(screen) => display::run(machine, screen, vm),
+        None => machine.run().map_err(anyhow::Error::from),
+    };
     drop(raw);
     let _ = writeln!(std::io::stdout());
+    let (outcome, stats) = result.context("ошибка выполнения ВМ")?;
     match outcome {
         RunOutcome::Reset => {
             tracing::info!(exits = stats.total(), "гость перезагрузился или выключился")
@@ -316,8 +329,20 @@ pub(crate) fn boot_android(args: &AndroidArgs) -> Result<()> {
         ConsoleKind::Serial => "ttyS0",
         ConsoleKind::Hvc => "hvc0",
     };
-    let bootconfig =
+    let mut bootconfig =
         rustdroid_bootconfig(&vendor_img.bootconfig, "pci0000:00/0000:00:01.0", console);
+    if args.vm.display.is_some() {
+        // Программный рендер в госте (SwiftShader/ANGLE) и композитор через DRM virtio-gpu.
+        for (k, v) in display::GUEST_SWIFTSHADER {
+            bootconfig.set(k, v);
+        }
+    }
+    for kv in &args.bootconfig {
+        let (k, v) = kv
+            .split_once('=')
+            .with_context(|| format!("--set ожидает КЛЮЧ=ЗНАЧЕНИЕ, получено {kv}"))?;
+        bootconfig.set(k.trim(), v.trim());
+    }
     let mut initrd = Vec::with_capacity(vendor_img.ramdisk.len() + generic_ramdisk.len() + 4096);
     initrd.extend_from_slice(vendor_img.ramdisk);
     initrd.extend_from_slice(generic_ramdisk);
@@ -341,6 +366,7 @@ pub(crate) fn boot_android(args: &AndroidArgs) -> Result<()> {
     let devices = VmDevices {
         disks: vec![("android".into(), Arc::new(disk))],
         console: None,
+        ..VmDevices::default()
     };
     run_vm(&cfg, devices, &args.vm)
 }

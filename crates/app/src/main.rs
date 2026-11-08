@@ -6,11 +6,14 @@
 //! - `rustdroid boot-android --images <каталог Cuttlefish>` — загрузка Android до шелла.
 //!
 //! Консоль гостя выводится в терминал, ввод с клавиатуры уходит в гостя. Выход: `Ctrl+A`, `X`.
-//! Окно и UI (Material Design 3) появятся на этапе 3.
+//! С `--display` открывается окно с экраном гостя (virtio-gpu 2D, D3D12) и вводом мышью и
+//! клавиатурой. UI в стиле Material Design 3 — на этапе 4.
 
 mod cli;
 #[cfg(windows)]
 mod console;
+#[cfg(windows)]
+mod display;
 #[cfg(windows)]
 mod preflight;
 
@@ -19,6 +22,20 @@ use clap::Parser;
 use tracing_subscriber::EnvFilter;
 
 use crate::cli::{Cli, Command};
+
+/// Просит драйвер NVIDIA Optimus запускать RustDroid на дискретной видеокарте.
+#[cfg(windows)]
+#[unsafe(no_mangle)]
+#[used]
+#[allow(non_upper_case_globals, reason = "имя задано драйвером NVIDIA")]
+pub static NvOptimusEnablement: u32 = 1;
+
+/// То же для AMD PowerXpress / Switchable Graphics.
+#[cfg(windows)]
+#[unsafe(no_mangle)]
+#[used]
+#[allow(non_upper_case_globals, reason = "имя задано драйвером AMD")]
+pub static AmdPowerXpressRequestHighPerformance: i32 = 1;
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
