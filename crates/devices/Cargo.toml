@@ -10,8 +10,13 @@ authors.workspace = true
 publish.workspace = true
 
 [dependencies]
-vm-superio.workspace = true
+crc32fast.workspace = true
+rustdroid-virtio.workspace = true
 tracing.workspace = true
+vm-superio.workspace = true
+
+[dev-dependencies]
+rustdroid-virtio = { workspace = true, features = ["test-utils"] }
 
 [lints]
 workspace = true
