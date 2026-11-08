@@ -105,12 +105,12 @@ sequenceDiagram
 | `windows` | биндинги WinHvPlatform / WinHvEmulation, Win32, D3D12, DXGI | официальный крейт Microsoft |
 | `WinHvEmulation.dll` | декодирование инструкций MMIO/PIO | системная библиотека |
 | `vm-superio` | 16550 UART | |
-| `virtio-queue` | split virtqueue | |
 | `smoltcp` | TCP/IP-стек для NAT | этап 5 |
 | gfxstream | декодер GPU-команд гостя | C++ через FFI, этап 4 |
 
 Пишем сами: обёртку WHPX, vCPU loop, загрузчик bzImage и слой гостевой памяти
-([ADR 0007](adr/0007-own-loader-and-memory.md)), ACPI, IOAPIC, PCI, virtio-pci транспорт, все устройства,
+([ADR 0007](adr/0007-own-loader-and-memory.md)), ACPI, IOAPIC, PCI, virtqueue и транспорт virtio-pci
+([ADR 0008](adr/0008-own-virtio-transport.md)), все устройства,
 композитор, ввод, keymapping, UI, обновления.
 
 ## Путь кадра (этапы 3–4)
