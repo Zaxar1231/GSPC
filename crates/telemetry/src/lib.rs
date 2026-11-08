@@ -7,5 +7,6 @@
 
 pub mod frame_stats;
 pub mod overlay;
+pub mod usage;
 
 pub use frame_stats::{FrameStats, FrameSummary};

@@ -72,9 +72,10 @@ pub struct VmDevices {
     pub disks: Vec<(String, Arc<dyn Disk>)>,
     /// virtio-console: вывод и буфер ввода (`hvc0`).
     pub console: Option<(Box<dyn Write + Send>, Arc<ConsoleInput>)>,
-    /// Дополнительные virtio-console без ввода (`hvc1`, `hvc2`, … по порядку): имя и вывод.
-    /// Нумерация `hvcN` в госте идёт по порядку устройств, поэтому они сразу за `hvc0`.
-    pub extra_consoles: Vec<(String, Box<dyn Write + Send>)>,
+    /// Дополнительные virtio-console (`hvc1`, `hvc2`, … по порядку): имя, вывод и ввод
+    /// (служба хоста может отвечать гостю). Нумерация `hvcN` в госте идёт по порядку
+    /// устройств, поэтому они сразу за `hvc0`.
+    pub extra_consoles: Vec<(String, Box<dyn Write + Send>, Arc<ConsoleInput>)>,
     /// virtio-vsock с указанным CID гостя.
     pub vsock_cid: Option<u64>,
     /// virtio-gpu: режим дисплея и ящик кадров для композитора.
@@ -397,11 +398,8 @@ impl Vm {
             }
             None => None,
         };
-        for (name, out) in devices.extra_consoles {
-            add(
-                name,
-                Box::new(VirtioConsole::new(out, Arc::new(ConsoleInput::default()))),
-            )?;
+        for (name, out, input) in devices.extra_consoles {
+            add(name, Box::new(VirtioConsole::new(out, input)))?;
         }
         if let Some((mode, mailbox)) = devices.gpu {
             add("gpu".into(), Box::new(VirtioGpu::new(mode, mailbox)))?;

@@ -14,6 +14,7 @@
 //! virtio-gpu вынесен в отдельный крейт `rustdroid-gpu`.
 
 pub mod blk;
+pub mod cf_services;
 pub mod console;
 pub mod disk;
 pub mod input;

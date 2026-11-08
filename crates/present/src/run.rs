@@ -9,6 +9,7 @@ use rustdroid_telemetry::FrameStats;
 use rustdroid_telemetry::overlay::OverlayData;
 
 use crate::d3d12::{PresentMode, Presenter};
+use crate::usage::UsageMeter;
 use crate::window::WindowHandle;
 
 /// Настройки вывода.
@@ -51,8 +52,11 @@ pub fn run(window: WindowHandle, mailbox: &Arc<Mailbox>, stop: &AtomicBool, cfg:
     let mut times: Vec<f32> = Vec::with_capacity(256);
     let mut next_deadline = Instant::now();
     let target_ms = 1000.0 / cfg.refresh_hz.max(1) as f32;
+    let mut meter = UsageMeter::default();
+    let mut usage = meter.update();
+    let mut last_usage = Instant::now();
     let mut overlay = OverlayData {
-        lines: Vec::with_capacity(4),
+        lines: Vec::with_capacity(6),
         frame_times_ms: Vec::with_capacity(256),
         target_ms,
     };
@@ -82,6 +86,11 @@ pub fn run(window: WindowHandle, mailbox: &Arc<Mailbox>, stop: &AtomicBool, cfg:
                 next_deadline.max(now) + Duration::from_secs_f64(1.0 / f64::from(cfg.fps_limit));
         }
 
+        if last_usage.elapsed() >= Duration::from_secs(1) {
+            last_usage = Instant::now();
+            usage = meter.update();
+        }
+
         let overlay_ref = if cfg.overlay {
             overlay.lines.clear();
             if let Some(s) = stats.summary() {
@@ -94,6 +103,7 @@ pub fn run(window: WindowHandle, mailbox: &Arc<Mailbox>, stop: &AtomicBool, cfg:
             if let Some(l) = latency.summary() {
                 overlay.lines.push(format!("LAT {:.1} MS", l.avg_frame_ms));
             }
+            overlay.lines.extend(usage.overlay_lines());
             overlay.frame_times_ms.clear();
             overlay.frame_times_ms.extend_from_slice(&times);
             Some(&overlay)
@@ -117,6 +127,9 @@ pub fn run(window: WindowHandle, mailbox: &Arc<Mailbox>, stop: &AtomicBool, cfg:
                     frame_ms = format_args!("{:.2}", s.avg_frame_ms),
                     p99_ms = format_args!("{:.2}", s.p99_frame_ms),
                     flush_to_present_ms = format_args!("{:.2}", l.avg_frame_ms),
+                    ram_gib = format_args!("{:.2}", usage.working_set_gib),
+                    cpu_pct = format_args!("{:.0}", usage.process_cpu),
+                    system_cpu_pct = format_args!("{:.0}", usage.system_cpu),
                     "кадры гостя"
                 );
             }

@@ -27,6 +27,16 @@ impl ConsoleInput {
             .extend(bytes);
     }
 
+    /// Забирает весь накопленный ввод (для тестов).
+    #[cfg(test)]
+    pub(crate) fn take_all(&self) -> Vec<u8> {
+        self.0
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .drain(..)
+            .collect()
+    }
+
     fn is_empty(&self) -> bool {
         self.0
             .lock()
@@ -119,6 +129,14 @@ impl VirtioDevice for VirtioConsole {
     }
     fn read_config(&self, _offset: u64, data: &mut [u8]) {
         data.fill(0);
+    }
+    fn take_pending_queues(&mut self) -> u64 {
+        // Служба хоста на этой консоли могла ответить прямо во время передачи гостя.
+        if self.input.is_empty() {
+            0
+        } else {
+            1 << RX_QUEUE
+        }
     }
     fn process_queue(
         &mut self,

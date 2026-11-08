@@ -7,6 +7,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
+use rustdroid_devices::cf_services::{OemLock, SensorsControl, ServiceEndpoint};
 use rustdroid_devices::{
     CompositeDisk, ConsoleInput, CowDisk, Disk, Partition, RawDisk, Serial16550, SparseDisk,
     ZeroDisk, open_image,
@@ -404,11 +405,22 @@ pub(crate) fn boot_android(args: &AndroidArgs) -> Result<()> {
     let mut logcat = Some(logcat);
     let extra_consoles = (1..CUTTLEFISH_CONSOLES)
         .map(|n| {
-            let out: Box<dyn Write + Send> = match logcat.take_if(|_| n == LOGCAT_HVC) {
-                Some(f) => Box::new(f),
-                None => Box::new(std::io::sink()),
+            let input = Arc::new(ConsoleInput::default());
+            let out: Box<dyn Write + Send> = match n {
+                LOGCAT_HVC => match logcat.take() {
+                    Some(f) => Box::new(f),
+                    None => Box::new(std::io::sink()),
+                },
+                SENSORS_CONTROL_HVC => Box::new(ServiceEndpoint::new(
+                    SensorsControl::default(),
+                    Arc::clone(&input),
+                )),
+                OEMLOCK_HVC => {
+                    Box::new(ServiceEndpoint::new(OemLock::default(), Arc::clone(&input)))
+                }
+                _ => Box::new(std::io::sink()),
             };
-            (format!("hvc{n}"), out)
+            (format!("hvc{n}"), out, input)
         })
         .collect();
 
@@ -425,5 +437,9 @@ pub(crate) fn boot_android(args: &AndroidArgs) -> Result<()> {
 const CUTTLEFISH_CONSOLES: u32 = 20;
 /// Консоль с logcat.
 const LOGCAT_HVC: u32 = 2;
+/// Консоль HAL oemlock.
+const OEMLOCK_HVC: u32 = 10;
+/// Управляющий канал HAL датчиков (`hvc19` — данные, хост пока ничего не шлёт).
+const SENSORS_CONTROL_HVC: u32 = 18;
 /// CID гостя virtio-vsock.
 const GUEST_CID: u64 = 3;

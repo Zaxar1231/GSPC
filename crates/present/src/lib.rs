@@ -16,4 +16,6 @@ pub mod d3d12;
 #[cfg(windows)]
 pub mod run;
 #[cfg(windows)]
+pub mod usage;
+#[cfg(windows)]
 pub mod window;
