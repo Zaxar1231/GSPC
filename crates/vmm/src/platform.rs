@@ -1,4 +1,4 @@
-//! Шина платформы этапа 1: RAM, COM1, IOAPIC и заглушки legacy-портов.
+//! Шина платформы: RAM, COM1, IOAPIC, PCI (ECAM и BAR) и заглушки legacy-портов.
 //!
 //! Это не горячий путь: legacy-устройства используются только при загрузке и для консоли.
 //! virtio (этап 2) пойдёт через doorbell-события и MSI-X мимо этой шины.
@@ -10,8 +10,9 @@ use std::sync::{Arc, Mutex, PoisonError};
 use rustdroid_devices::{InterruptLine, Serial16550};
 
 use crate::ioapic::{InterruptSink, IoApic};
-use crate::layout::{IOAPIC_ADDR, IOAPIC_SIZE};
+use crate::layout::{ECAM_ADDR, ECAM_SIZE, IOAPIC_ADDR, IOAPIC_SIZE};
 use crate::memory::GuestRam;
+use crate::pci::PciBus;
 
 /// Базовый порт COM1.
 pub const COM1_PORT: u16 = 0x3F8;
@@ -83,6 +84,7 @@ pub struct PlatformBus {
     ram: Arc<GuestRam>,
     serial: Arc<Mutex<Serial16550>>,
     ioapic: Arc<Mutex<IoApic>>,
+    pci: Arc<PciBus>,
     events: Arc<VmEvents>,
     logged: HashSet<u64>,
 }
@@ -100,12 +102,14 @@ impl PlatformBus {
         ram: Arc<GuestRam>,
         serial: Arc<Mutex<Serial16550>>,
         ioapic: Arc<Mutex<IoApic>>,
+        pci: Arc<PciBus>,
         events: Arc<VmEvents>,
     ) -> Self {
         Self {
             ram,
             serial,
             ioapic,
+            pci,
             events,
             logged: HashSet::new(),
         }
@@ -186,6 +190,16 @@ impl PlatformBus {
             }
             return;
         }
+        if (ECAM_ADDR..ECAM_ADDR + ECAM_SIZE).contains(&gpa) {
+            self.pci.ecam_read(gpa - ECAM_ADDR, data);
+            return;
+        }
+        if let Some((func, off)) = self.pci.bar_lookup(gpa) {
+            func.lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .bar_read(off, data);
+            return;
+        }
         data.fill(0xFF);
         self.events.unknown_mmio.fetch_add(1, Ordering::Relaxed);
         self.log_unknown("mmio", gpa, false);
@@ -205,6 +219,17 @@ impl PlatformBus {
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner)
                 .mmio_write(gpa - IOAPIC_ADDR, u32::from_le_bytes(bytes));
+            return;
+        }
+        if (ECAM_ADDR..ECAM_ADDR + ECAM_SIZE).contains(&gpa) {
+            self.pci.ecam_write(gpa - ECAM_ADDR, data);
+            return;
+        }
+        if let Some((func, off)) = self.pci.bar_lookup(gpa) {
+            // Путь без doorbell: запись в notify обрабатывается здесь же, в потоке vCPU.
+            func.lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .bar_write(off, data);
             return;
         }
         self.events.unknown_mmio.fetch_add(1, Ordering::Relaxed);
@@ -273,7 +298,13 @@ mod tests {
         let serial = Arc::new(Mutex::new(Serial16550::new(line, Box::new(out.clone()))));
         let events = Arc::new(VmEvents::default());
         (
-            PlatformBus::new(ram, serial.clone(), ioapic, events.clone()),
+            PlatformBus::new(
+                ram,
+                serial.clone(),
+                ioapic,
+                Arc::new(PciBus::new()),
+                events.clone(),
+            ),
             out,
             rec,
             serial,
@@ -325,6 +356,14 @@ mod tests {
         b.pio_read(0x1234, &mut d);
         assert_eq!(d, [0xFF, 0xFF]);
         assert_eq!(ev.unknown_pio(), 1);
+    }
+
+    #[test]
+    fn empty_pci_bus_reads_all_ones() {
+        let (mut b, ..) = bus();
+        let mut d = [0_u8; 4];
+        b.mmio_read(ECAM_ADDR + (3 << 15), &mut d);
+        assert_eq!(d, [0xFF; 4]);
     }
 
     #[test]

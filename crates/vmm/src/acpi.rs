@@ -5,7 +5,9 @@
 //! COM1 описан в DSDT устройством `PNP0501`, чтобы ядро нашло его IRQ через ACPI.
 
 use crate::error::Result;
-use crate::layout::{ACPI_ADDR, ACPI_SIZE, IOAPIC_ADDR, LAPIC_ADDR};
+use crate::layout::{
+    ACPI_ADDR, ACPI_SIZE, ECAM_ADDR, IOAPIC_ADDR, LAPIC_ADDR, PCI_MMIO_END, PCI_MMIO_START,
+};
 use crate::memory::GuestRam;
 
 const OEM_ID: &[u8; 6] = b"RDROID";
@@ -217,8 +219,44 @@ fn dsdt(cfg: &AcpiConfig) -> Vec<u8> {
     let mut com1 = aml::name(b"_HID", &aml::dword(aml::eisa_id(b"PNP0501")));
     com1.extend(aml::name(b"_UID", &aml::ZERO));
     com1.extend(aml::name(b"_CRS", &aml::buffer(&resources)));
-    let body = aml::scope(b"\\_SB_", &aml::device(b"COM1", &com1));
+    let mut sb = aml::device(b"COM1", &com1);
+    sb.extend(aml::device(b"PCI0", &pci_root()));
+    let body = aml::scope(b"\\_SB_", &sb);
     sdt(b"DSDT", 2, &body)
+}
+
+/// Корневой мост PCIe: шина 0, окно MMIO для BAR.
+fn pci_root() -> Vec<u8> {
+    #[allow(clippy::cast_possible_truncation, reason = "окно BAR под 4 ГиБ")]
+    let (min, max) = (PCI_MMIO_START as u32, (PCI_MMIO_END - 1) as u32);
+    let len = max - min + 1;
+    let mut res = vec![
+        // WordBusNumber(ResourceProducer, MinFixed, MaxFixed, , 0, 0, 0, 0, 1)
+        0x88, 0x0D, 0x00, 0x02, 0x0C, 0x00, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0,
+        // DWordMemory(ResourceProducer, PosDecode, MinFixed, MaxFixed, NonCacheable, ReadWrite)
+        0x87, 0x17, 0x00, 0x00, 0x0C, 0x01,
+    ];
+    for v in [0, min, max, 0, len] {
+        res.extend_from_slice(&v.to_le_bytes());
+    }
+    res.extend_from_slice(&[0x79, 0x00]);
+    let mut body = aml::name(b"_HID", &aml::dword(aml::eisa_id(b"PNP0A08")));
+    body.extend(aml::name(b"_CID", &aml::dword(aml::eisa_id(b"PNP0A03"))));
+    body.extend(aml::name(b"_SEG", &aml::ZERO));
+    body.extend(aml::name(b"_BBN", &aml::ZERO));
+    body.extend(aml::name(b"_UID", &aml::ZERO));
+    body.extend(aml::name(b"_CRS", &aml::buffer(&res)));
+    body
+}
+
+/// MCFG: ECAM шины 0.
+fn mcfg() -> Vec<u8> {
+    let mut body = vec![0_u8; 8];
+    body.extend_from_slice(&ECAM_ADDR.to_le_bytes());
+    body.extend_from_slice(&0_u16.to_le_bytes()); // сегмент
+    body.extend_from_slice(&[0, 0]); // шины 0..0
+    body.extend_from_slice(&0_u32.to_le_bytes());
+    sdt(b"MCFG", 1, &body)
 }
 
 fn rsdp(xsdt_addr: u64) -> Vec<u8> {
@@ -251,18 +289,21 @@ pub fn write_tables(ram: &GuestRam, cfg: &AcpiConfig) -> Result<u64> {
     let align = |v: u64| v.div_ceil(16) * 16;
     let rsdp_addr = ACPI_ADDR;
     let xsdt_addr = rsdp_addr + 64;
-    // XSDT: заголовок + 2 указателя.
-    let fadt_addr = align(xsdt_addr + HEADER_LEN as u64 + 16);
+    // XSDT: заголовок + 3 указателя.
+    let fadt_addr = align(xsdt_addr + HEADER_LEN as u64 + 24);
     let dsdt_addr = align(fadt_addr + 276);
     let dsdt_table = dsdt(cfg);
     let madt_addr = align(dsdt_addr + dsdt_table.len() as u64);
     let madt_table = madt(cfg);
+    let mcfg_addr = align(madt_addr + madt_table.len() as u64);
+    let mcfg_table = mcfg();
 
     let mut xsdt_body = Vec::new();
     xsdt_body.extend_from_slice(&fadt_addr.to_le_bytes());
     xsdt_body.extend_from_slice(&madt_addr.to_le_bytes());
+    xsdt_body.extend_from_slice(&mcfg_addr.to_le_bytes());
 
-    if madt_addr + madt_table.len() as u64 > ACPI_ADDR + ACPI_SIZE {
+    if mcfg_addr + mcfg_table.len() as u64 > ACPI_ADDR + ACPI_SIZE {
         return Err(crate::error::Error::OutOfGuestMemory(
             "ACPI-таблицы не помещаются",
         ));
@@ -273,6 +314,7 @@ pub fn write_tables(ram: &GuestRam, cfg: &AcpiConfig) -> Result<u64> {
     ram.write(fadt_addr, &fadt(dsdt_addr))?;
     ram.write(dsdt_addr, &dsdt_table)?;
     ram.write(madt_addr, &madt_table)?;
+    ram.write(mcfg_addr, &mcfg_table)?;
     Ok(rsdp_addr)
 }
 
@@ -312,6 +354,7 @@ mod tests {
             madt(&cfg),
             fadt(0x1234),
             dsdt(&cfg),
+            mcfg(),
             sdt(b"XSDT", 1, &[0; 16]),
         ] {
             assert_eq!(sum(&t), 0, "{:?}", std::str::from_utf8(&t[..4]));
@@ -322,6 +365,20 @@ mod tests {
         let r = rsdp(0xE0040);
         assert_eq!(sum(&r[..20]), 0);
         assert_eq!(sum(&r), 0);
+    }
+
+    #[test]
+    fn pci_root_resources() {
+        let root = pci_root();
+        // _CRS: BufferOp, PkgLength = 1 + BufferSize (2) + 44 байта ресурсов
+        // (WordBusNumber 16 + DWordMemory 26 + EndTag 2).
+        let crs = root.windows(4).position(|w| w == b"_CRS").unwrap();
+        assert_eq!(&root[crs + 4..crs + 8], &[0x11, 47, 0x0A, 44]);
+        let dsdt = dsdt(&AcpiConfig::default());
+        assert!(dsdt.windows(4).any(|w| w == b"PCI0"));
+        let m = mcfg();
+        assert_eq!(m.len(), 60);
+        assert_eq!(u64::from_le_bytes(m[44..52].try_into().unwrap()), ECAM_ADDR);
     }
 
     #[test]

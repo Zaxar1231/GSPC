@@ -11,6 +11,7 @@ publish.workspace = true
 
 [dependencies]
 rustdroid-devices.workspace = true
+rustdroid-virtio.workspace = true
 rustdroid-whpx.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
@@ -26,3 +27,6 @@ windows = { workspace = true, features = [
 
 [lints]
 workspace = true
+
+[dev-dependencies]
+rustdroid-virtio = { workspace = true, features = ["test-utils"] }

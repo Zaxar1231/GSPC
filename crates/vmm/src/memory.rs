@@ -350,6 +350,20 @@ impl Drop for Backing {
     }
 }
 
+impl rustdroid_virtio::GuestMemory for GuestRam {
+    fn read(&self, gpa: u64, buf: &mut [u8]) -> Result<(), rustdroid_virtio::MemoryError> {
+        let len = buf.len();
+        Self::read(self, gpa, buf).map_err(|_| rustdroid_virtio::MemoryError { gpa, len })
+    }
+
+    fn write(&self, gpa: u64, buf: &[u8]) -> Result<(), rustdroid_virtio::MemoryError> {
+        Self::write(self, gpa, buf).map_err(|_| rustdroid_virtio::MemoryError {
+            gpa,
+            len: buf.len(),
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
