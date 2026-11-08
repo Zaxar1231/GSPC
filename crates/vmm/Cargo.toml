@@ -11,6 +11,7 @@ publish.workspace = true
 
 [dependencies]
 rustdroid-devices.workspace = true
+rustdroid-gpu.workspace = true
 rustdroid-virtio.workspace = true
 rustdroid-whpx.workspace = true
 thiserror.workspace = true

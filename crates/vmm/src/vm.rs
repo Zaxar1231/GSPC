@@ -6,7 +6,11 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use rustdroid_devices::{ConsoleInput, Disk, Serial16550, VirtioBlk, VirtioConsole};
+use rustdroid_devices::{
+    ConsoleInput, Disk, InputEvent, InputEvents, InputKind, Serial16550, VirtioBlk, VirtioConsole,
+    VirtioInput,
+};
+use rustdroid_gpu::{DisplayMode, Mailbox, VirtioGpu};
 use rustdroid_virtio::{GuestMemory, MsiMessage, MsiSink, VirtioPci};
 use rustdroid_whpx::sys::{
     WHV_INTERNAL_ACTIVITY_REGISTER, WHV_X64_SEGMENT_REGISTER, WHV_X64_SEGMENT_REGISTER_0,
@@ -66,6 +70,10 @@ pub struct VmDevices {
     pub disks: Vec<(String, Arc<dyn Disk>)>,
     /// virtio-console: вывод и буфер ввода.
     pub console: Option<(Box<dyn Write + Send>, Arc<ConsoleInput>)>,
+    /// virtio-gpu: режим дисплея и ящик кадров для композитора.
+    pub gpu: Option<(DisplayMode, Arc<Mailbox>)>,
+    /// virtio-input: вид устройства, имя и очередь событий.
+    pub inputs: Vec<(InputKind, String, Arc<InputEvents>)>,
 }
 
 impl std::fmt::Debug for VmDevices {
@@ -80,6 +88,8 @@ impl std::fmt::Debug for VmDevices {
                     .collect::<Vec<_>>(),
             )
             .field("console", &self.console.is_some())
+            .field("gpu", &self.gpu.as_ref().map(|(m, _)| *m))
+            .field("inputs", &self.inputs.len())
             .finish()
     }
 }
@@ -216,6 +226,30 @@ impl ConsoleHandle {
     }
 }
 
+/// Ручка устройства ввода: события и пробуждение очереди событий.
+#[derive(Clone)]
+pub struct InputHandle {
+    events: Arc<InputEvents>,
+    function: SharedFunction,
+}
+
+impl std::fmt::Debug for InputHandle {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("InputHandle").finish_non_exhaustive()
+    }
+}
+
+impl InputHandle {
+    /// Передаёт события в гостя сразу, без ожидания кадра.
+    pub fn push(&self, events: &[InputEvent]) {
+        self.events.push(events);
+        self.function
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .notify(0);
+    }
+}
+
 /// Виртуальная машина. Поля удаляются в порядке объявления: workers и партиция до RAM.
 pub struct Vm {
     /// Держит worker-потоки устройств живыми до удаления ВМ.
@@ -225,6 +259,7 @@ pub struct Vm {
     ioapic: Arc<Mutex<IoApic>>,
     pci: Arc<PciBus>,
     console: Option<ConsoleHandle>,
+    inputs: Vec<InputHandle>,
     events: Arc<VmEvents>,
     stop: Arc<AtomicBool>,
     cpus: u32,
@@ -352,6 +387,20 @@ impl Vm {
             }
             None => None,
         };
+        if let Some((mode, mailbox)) = devices.gpu {
+            add("gpu".into(), Box::new(VirtioGpu::new(mode, mailbox)))?;
+        }
+        let mut inputs = Vec::new();
+        for (i, (kind, name, events)) in devices.inputs.into_iter().enumerate() {
+            let f = add(
+                format!("input{i}"),
+                Box::new(VirtioInput::new(kind, &name, Arc::clone(&events))),
+            )?;
+            inputs.push(InputHandle {
+                events,
+                function: f,
+            });
+        }
         let pci = Arc::new(pci);
 
         // Ядро, ACPI, таблицы.
@@ -405,6 +454,7 @@ impl Vm {
             ioapic,
             pci,
             console,
+            inputs,
             events: Arc::new(VmEvents::default()),
             stop: Arc::new(AtomicBool::new(false)),
             cpus: cfg.cpus,
@@ -418,6 +468,12 @@ impl Vm {
     #[must_use]
     pub fn serial(&self) -> Arc<Mutex<Serial16550>> {
         Arc::clone(&self.serial)
+    }
+
+    /// Устройства ввода в порядке `VmDevices::inputs`.
+    #[must_use]
+    pub fn inputs(&self) -> Vec<InputHandle> {
+        self.inputs.clone()
     }
 
     /// virtio-console, если подключена.

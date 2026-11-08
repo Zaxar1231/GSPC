@@ -34,4 +34,4 @@ pub mod worker;
 
 pub use error::{Error, Result};
 #[cfg(windows)]
-pub use vm::{ConsoleHandle, ExitStats, RunOutcome, Stopper, Vm, VmConfig, VmDevices};
+pub use vm::{ConsoleHandle, ExitStats, InputHandle, RunOutcome, Stopper, Vm, VmConfig, VmDevices};
