@@ -246,8 +246,8 @@ pub const USERDATA_SIZE: u64 = 8 << 30;
 /// [`USERDATA_SIZE`], который Android форматирует сам (флаг `formattable` в fstab).
 const USERDATA_MIN_IMAGE: u64 = 256 << 20;
 
-/// План разделов по каталогу образов: слотовые разделы `_a`, `super`, `userdata`, плюс пустые
-/// `misc` (1 МиБ) и `metadata` (64 МиБ), которые Android форматирует сам.
+/// План разделов по каталогу образов: слотовые разделы `_a`, `super`, `userdata`, `custom`, плюс
+/// пустые `misc`, `frp` (по 1 МиБ) и `metadata` (64 МиБ), которые Android форматирует сам.
 ///
 /// # Errors
 /// Нет `super.img`.
@@ -260,11 +260,20 @@ pub fn partition_plan(dir: &Path) -> Result<Vec<PartitionPlan>, AndroidError> {
     if exists("super").is_none() {
         return Err(AndroidError::Missing("super.img"));
     }
-    let mut plan = vec![PartitionPlan {
-        name: "misc".into(),
-        image: None,
-        empty_size: 1 << 20,
-    }];
+    let mut plan = vec![
+        PartitionPlan {
+            name: "misc".into(),
+            image: None,
+            empty_size: 1 << 20,
+        },
+        // Factory reset protection: без него PersistentDataBlockService не стартует и
+        // system_server падает (`ro.frp.pst=/dev/block/by-name/frp`).
+        PartitionPlan {
+            name: "frp".into(),
+            image: None,
+            empty_size: 1 << 20,
+        },
+    ];
     for n in SLOTTED {
         if let Some(p) = exists(n) {
             plan.push(PartitionPlan {
@@ -286,6 +295,14 @@ pub fn partition_plan(dir: &Path) -> Result<Vec<PartitionPlan>, AndroidError> {
         empty_size: if userdata.is_some() { 0 } else { USERDATA_SIZE },
         image: userdata,
     });
+    // Пример пользовательского раздела Cuttlefish (init монтирует его в /mnt/vendor/custom).
+    if let Some(p) = exists("cuttlefish_example_custom") {
+        plan.push(PartitionPlan {
+            name: "custom".into(),
+            image: Some(p),
+            empty_size: 0,
+        });
+    }
     plan.push(PartitionPlan {
         name: "metadata".into(),
         image: None,
@@ -510,6 +527,7 @@ mod tests {
             names,
             [
                 "misc",
+                "frp",
                 "boot_a",
                 "vendor_boot_a",
                 "vbmeta_a",

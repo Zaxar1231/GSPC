@@ -19,6 +19,9 @@
   `userdata.img` в архивах Cuttlefish — Android sparse. Добавлен `SparseDisk`: чтение sparse-образов
   без распаковки, индекс чанков строится за доли миллисекунды.
 - Окно до первого кадра гостя было белым, теперь чёрное.
+- system_server падал каждые ~13 секунд: `PersistentDataBlockService` (защита от сброса, FRP)
+  не находила раздел `/dev/block/by-name/frp`. На диск добавлены пустой `frp` (1 МиБ) и
+  `custom` из `cuttlefish_example_custom.img`.
 - system_server убивал собственный Watchdog через 66 секунд: при создании `SensorManager`
   он ждал HAL датчиков, а тот — ответа хоста на `list-sensors` по `hvc18`.
 - Android доходил до загрузочной анимации, но не загружался: HAL Cuttlefish (подсветка, датчики,
