@@ -3,8 +3,9 @@
 use std::ffi::c_void;
 use std::sync::Arc;
 
+use windows::Win32::Foundation::HANDLE;
 use windows::Win32::System::Hypervisor::{
-    WHV_INTERRUPT_CONTROL, WHV_MAP_GPA_RANGE_FLAGS, WHV_PARTITION_HANDLE,
+    WHV_DOORBELL_MATCH_DATA, WHV_INTERRUPT_CONTROL, WHV_MAP_GPA_RANGE_FLAGS, WHV_PARTITION_HANDLE,
     WHV_PARTITION_PROPERTY_CODE, WHvPartitionPropertyCodeCpuidExitList,
     WHvPartitionPropertyCodeLocalApicEmulationMode, WHvPartitionPropertyCodeProcessorCount,
     WHvX64LocalApicEmulationModeXApic,
@@ -274,6 +275,32 @@ impl Partition {
         })
     }
 
+    /// Регистрирует doorbell: запись гостя по `gpa` сигналит `event` без выхода vCPU в user
+    /// mode. Сопоставление идёт по адресу, при любой длине и значении записи.
+    ///
+    /// # Errors
+    /// Ошибка WHPX (например, адрес уже зарегистрирован).
+    pub fn register_doorbell(&self, gpa: u64, event: HANDLE) -> Result<()> {
+        let m = doorbell(gpa);
+        // SAFETY: структура локальная; событие принадлежит вызывающему и должно жить до
+        // `unregister_doorbell` (обеспечивает владелец события).
+        check("WHvRegisterPartitionDoorbellEvent", unsafe {
+            (self.api.register_doorbell)(self.handle, &raw const m, event)
+        })
+    }
+
+    /// Снимает doorbell.
+    ///
+    /// # Errors
+    /// Ошибка WHPX.
+    pub fn unregister_doorbell(&self, gpa: u64) -> Result<()> {
+        let m = doorbell(gpa);
+        // SAFETY: структура локальная, дескриптор партиции валиден.
+        check("WHvUnregisterPartitionDoorbellEvent", unsafe {
+            (self.api.unregister_doorbell)(self.handle, &raw const m)
+        })
+    }
+
     /// Создаёт виртуальный процессор.
     ///
     /// # Errors
@@ -288,6 +315,16 @@ impl Partition {
 
     pub(crate) fn api(&self) -> &'static Platform {
         self.api
+    }
+}
+
+fn doorbell(gpa: u64) -> WHV_DOORBELL_MATCH_DATA {
+    // Битовые поля MatchOnValue:1, MatchOnLength:1 — оба выключены.
+    WHV_DOORBELL_MATCH_DATA {
+        GuestAddress: gpa,
+        Value: 0,
+        Length: 0,
+        _bitfield: 0,
     }
 }
 

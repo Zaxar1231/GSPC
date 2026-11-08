@@ -7,12 +7,13 @@
 use std::ffi::c_void;
 use std::sync::OnceLock;
 
-use windows::Win32::Foundation::HMODULE;
+use windows::Win32::Foundation::{HANDLE, HMODULE};
 use windows::Win32::System::Hypervisor::{
-    WHV_CAPABILITY_CODE, WHV_EMULATOR_CALLBACKS, WHV_EMULATOR_STATUS, WHV_INTERRUPT_CONTROL,
-    WHV_MAP_GPA_RANGE_FLAGS, WHV_MEMORY_ACCESS_CONTEXT, WHV_PARTITION_HANDLE,
-    WHV_PARTITION_PROPERTY_CODE, WHV_REGISTER_NAME, WHV_REGISTER_VALUE, WHV_TRANSLATE_GVA_FLAGS,
-    WHV_TRANSLATE_GVA_RESULT, WHV_VP_EXIT_CONTEXT, WHV_X64_IO_PORT_ACCESS_CONTEXT,
+    WHV_CAPABILITY_CODE, WHV_DOORBELL_MATCH_DATA, WHV_EMULATOR_CALLBACKS, WHV_EMULATOR_STATUS,
+    WHV_INTERRUPT_CONTROL, WHV_MAP_GPA_RANGE_FLAGS, WHV_MEMORY_ACCESS_CONTEXT,
+    WHV_PARTITION_HANDLE, WHV_PARTITION_PROPERTY_CODE, WHV_REGISTER_NAME, WHV_REGISTER_VALUE,
+    WHV_TRANSLATE_GVA_FLAGS, WHV_TRANSLATE_GVA_RESULT, WHV_VP_EXIT_CONTEXT,
+    WHV_X64_IO_PORT_ACCESS_CONTEXT,
 };
 use windows::Win32::System::LibraryLoader::{
     GetProcAddress, LOAD_LIBRARY_SEARCH_SYSTEM32, LoadLibraryExW,
@@ -73,6 +74,14 @@ pub(crate) type FnTranslateGva = unsafe extern "system" fn(
     *mut u64,
 ) -> HRESULT;
 
+pub(crate) type FnRegisterDoorbell = unsafe extern "system" fn(
+    WHV_PARTITION_HANDLE,
+    *const WHV_DOORBELL_MATCH_DATA,
+    HANDLE,
+) -> HRESULT;
+pub(crate) type FnUnregisterDoorbell =
+    unsafe extern "system" fn(WHV_PARTITION_HANDLE, *const WHV_DOORBELL_MATCH_DATA) -> HRESULT;
+
 pub(crate) type FnEmulatorCreate =
     unsafe extern "system" fn(*const WHV_EMULATOR_CALLBACKS, *mut *mut c_void) -> HRESULT;
 pub(crate) type FnEmulatorDestroy = unsafe extern "system" fn(*const c_void) -> HRESULT;
@@ -108,6 +117,8 @@ pub(crate) struct Platform {
     pub set_vp_registers: FnSetVpRegisters,
     pub request_interrupt: FnRequestInterrupt,
     pub translate_gva: FnTranslateGva,
+    pub register_doorbell: FnRegisterDoorbell,
+    pub unregister_doorbell: FnUnregisterDoorbell,
 }
 
 /// Таблица функций `WinHvEmulation.dll`.
@@ -191,6 +202,8 @@ fn load_platform() -> Result<Platform> {
         set_vp_registers: sym!(m, l, "WHvSetVirtualProcessorRegisters"),
         request_interrupt: sym!(m, l, "WHvRequestInterrupt"),
         translate_gva: sym!(m, l, "WHvTranslateGva"),
+        register_doorbell: sym!(m, l, "WHvRegisterPartitionDoorbellEvent"),
+        unregister_doorbell: sym!(m, l, "WHvUnregisterPartitionDoorbellEvent"),
     })
 }
 

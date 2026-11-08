@@ -9,7 +9,13 @@ repository.workspace = true
 authors.workspace = true
 publish.workspace = true
 
+[features]
+# Память на векторе для тестов других крейтов.
+test-utils = []
+
 [dependencies]
+thiserror.workspace = true
+tracing.workspace = true
 
 [lints]
 workspace = true

@@ -55,6 +55,7 @@ criterion = { version = "0.8", default-features = false, features = ["cargo_benc
 windows = { version = "0.62", default-features = false }
 vm-superio = "0.8"
 sha2 = "0.11"
+crc32fast = "1.5"
 clap = { version = "4", features = ["derive"] }
 
 [workspace.lints.rust]

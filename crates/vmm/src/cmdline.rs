@@ -31,7 +31,6 @@ pub fn build(timing: &Timing, extra: &str) -> String {
         "no_timer_check".to_owned(),
         "reboot=k".to_owned(),
         "panic=-1".to_owned(),
-        "pci=off".to_owned(),
         "i8042.noaux".to_owned(),
         "i8042.nomux".to_owned(),
         "i8042.nopnp".to_owned(),

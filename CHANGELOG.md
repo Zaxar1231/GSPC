@@ -10,6 +10,16 @@
 
 ### Added
 
+- Этап 2: virtio и загрузка Android.
+  - PCI: ECAM, ACPI MCFG, корневой мост `PCI0` в DSDT, предназначенные BAR.
+  - `rustdroid-virtio`: split virtqueue (EVENT_IDX, indirect), MSI-X (маски, PBA), транспорт
+    virtio-pci modern.
+  - Doorbell-события WHPX: worker устройств просыпается без выхода vCPU в user mode.
+  - virtio-blk с бэкендами raw, copy-on-write (`RDCOWv1`) и составным GPT-диском; virtio-console.
+  - SMP (экспериментально): `--cpus N`.
+  - `rustdroid boot --disk … --cpus … --console hvc`, `rustdroid boot-android --images …`:
+    разбор boot/init_boot/vendor_boot v3/v4, initrd + bootconfig, CoW-оверлеи инстанса, `--reset`.
+  - `cargo xtask cf-fetch` — образы Cuttlefish x86_64 с ci.android.com.
 - Этап 1: минимальный VMM на WHPX.
   - `rustdroid-whpx`: динамическая загрузка WinHvPlatform/WinHvEmulation с понятными ошибками,
     партиция, отображение памяти, vCPU, регистры, инъекция прерываний, быстрый путь `in`/`out`,

@@ -208,6 +208,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "crc32fast"
+version = "1.5.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5f97d3416d5337d15c4b0d78c8c91df922ca143f57ec20e2d1c188333047ef04"
+dependencies = [
+ "cfg-if",
+]
+
+[[package]]
 name = "criterion"
 version = "0.8.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -458,6 +467,7 @@ dependencies = [
  "anyhow",
  "clap",
  "rustdroid-devices",
+ "rustdroid-instance",
  "rustdroid-vmm",
  "rustdroid-whpx",
  "tracing",
@@ -473,6 +483,8 @@ version = "0.0.1"
 name = "rustdroid-devices"
 version = "0.0.1"
 dependencies = [
+ "crc32fast",
+ "rustdroid-virtio",
  "tracing",
  "vm-superio",
 ]
@@ -521,12 +533,17 @@ version = "0.0.1"
 [[package]]
 name = "rustdroid-virtio"
 version = "0.0.1"
+dependencies = [
+ "thiserror",
+ "tracing",
+]
 
 [[package]]
 name = "rustdroid-vmm"
 version = "0.0.1"
 dependencies = [
  "rustdroid-devices",
+ "rustdroid-virtio",
  "rustdroid-whpx",
  "thiserror",
  "tracing",

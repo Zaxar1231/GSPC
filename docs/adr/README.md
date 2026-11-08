@@ -9,5 +9,6 @@
 | [0005](0005-velopack.md) | Установщик и обновления на Velopack |
 | [0006](0006-material-design-3.md) | UI в стиле Material Design 3 |
 | [0007](0007-own-loader-and-memory.md) | Свои загрузчик ядра и слой гостевой памяти |
+| [0008](0008-own-virtio-transport.md) | Свой транспорт virtio-pci, virtqueue и формат copy-on-write |
 
 Новое решение — новый файл `NNNN-<имя>.md` со статусом, контекстом, решением и последствиями.

@@ -11,7 +11,10 @@
 //! 0x0010_0000  RAM
 //! 0x0100_0000  ядро (protected-mode часть bzImage)
 //!   ...        initrd (под верхней границей нижней RAM)
-//! 0xC000_0000  MMIO-дыра (до 4 ГиБ): IOAPIC 0xFEC0_0000, LAPIC 0xFEE0_0000
+//! 0xC000_0000  MMIO-дыра (до 4 ГиБ):
+//!   0xC000_0000..0xE000_0000  окно BAR устройств PCI
+//!   0xE000_0000               ECAM (конфигурационное пространство PCI, шина 0)
+//!   0xFEC0_0000 IOAPIC, 0xFEE0_0000 LAPIC
 //! 0x1_0000_0000 остаток RAM
 //! ```
 
@@ -45,6 +48,14 @@ pub const KERNEL_LOAD_ADDR: u64 = 0x100_0000;
 pub const MMIO_HOLE_START: u64 = 0xC000_0000;
 /// Конец MMIO-дыры.
 pub const MMIO_HOLE_END: u64 = 0x1_0000_0000;
+/// Начало окна BAR устройств PCI.
+pub const PCI_MMIO_START: u64 = 0xC000_0000;
+/// Конец окна BAR (не включительно).
+pub const PCI_MMIO_END: u64 = 0xE000_0000;
+/// База ECAM.
+pub const ECAM_ADDR: u64 = 0xE000_0000;
+/// Размер ECAM для шины 0 (32 устройства × 8 функций × 4 КиБ).
+pub const ECAM_SIZE: u64 = 0x10_0000;
 /// Базовый адрес IOAPIC.
 pub const IOAPIC_ADDR: u64 = 0xFEC0_0000;
 /// Размер окна IOAPIC.
@@ -128,6 +139,12 @@ pub fn e820_map(total: u64) -> Vec<E820Entry> {
             kind: E820Kind::Ram,
         });
     }
+    // ECAM должен быть зарезервирован в e820, иначе ядро не станет использовать MCFG.
+    map.push(E820Entry {
+        addr: ECAM_ADDR,
+        size: ECAM_SIZE,
+        kind: E820Kind::Reserved,
+    });
     if let Some(high) = ranges.get(1) {
         map.push(E820Entry {
             addr: high.gpa,
@@ -189,7 +206,15 @@ mod tests {
         assert_eq!(m[1].kind, E820Kind::Reserved);
         assert_eq!(m[1].addr + m[1].size, HIGH_MEMORY_START);
         assert_eq!(m[2].addr, HIGH_MEMORY_START);
-        assert_eq!(m[3].addr, MMIO_HOLE_END);
+        assert_eq!(
+            m[3],
+            E820Entry {
+                addr: ECAM_ADDR,
+                size: ECAM_SIZE,
+                kind: E820Kind::Reserved
+            }
+        );
+        assert_eq!(m[4].addr, MMIO_HOLE_END);
         // ACPI-таблицы лежат в зарезервированной области.
         assert!(ACPI_ADDR >= m[1].addr && ACPI_ADDR + ACPI_SIZE <= m[1].addr + m[1].size);
     }
