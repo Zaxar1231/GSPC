@@ -1,11 +1,32 @@
 //! Ядро VMM RustDroid.
 //!
-//! Зона ответственности:
-//! - поток на каждый vCPU с циклом обработки exit-причин (MMIO, PIO, MSR, CPUID, HLT);
-//! - гостевая RAM: заранее выделенная, с prefault и опциональными страницами 2 МБ;
-//! - прямая загрузка bzImage + initramfs + cmdline (64-битная точка входа, без BIOS);
-//! - IOAPIC, маршрутизация MSI/MSI-X, ACPI-таблицы (RSDP, XSDT, MADT, FADT, DSDT, MCFG);
-//! - PCI-шина (ECAM) для virtio-pci устройств;
-//! - снапшоты (RAM + состояние vCPU и устройств).
+//! Портируемая часть (тестируется на любой ОС):
+//! - [`layout`] — раскладка гостевых физических адресов и карта e820;
+//! - [`memory`] — гостевая RAM (предвыделение, prefault, большие страницы);
+//! - [`loader`] — прямая загрузка bzImage + initrd + cmdline по 64-битному boot protocol;
+//! - [`boot_cpu`] — identity-mapping, GDT и регистры BSP для 64-битной точки входа;
+//! - [`acpi`] — RSDP/XSDT/FADT (hardware-reduced)/MADT/DSDT;
+//! - [`ioapic`] — модель IOAPIC;
+//! - [`platform`] — шина: RAM, COM1, IOAPIC, заглушки legacy-портов;
+//! - [`cmdline`] — командная строка ядра по умолчанию.
 //!
-//! Реализация — этапы 1–2 и 10 (см. `docs/roadmap.md`).
+//! Только Windows: `vm` (ВМ на WHPX и цикл vCPU) и `host` (P-ядра, MMCSS).
+
+pub mod acpi;
+pub mod boot_cpu;
+pub mod cmdline;
+mod error;
+pub mod ioapic;
+pub mod layout;
+pub mod loader;
+pub mod memory;
+pub mod platform;
+
+#[cfg(windows)]
+pub mod host;
+#[cfg(windows)]
+pub mod vm;
+
+pub use error::{Error, Result};
+#[cfg(windows)]
+pub use vm::{ExitStats, RunOutcome, Stopper, Vm, VmConfig};

@@ -4,7 +4,10 @@
 //! - `cargo xtask ci` — те же проверки, что в CI: fmt, clippy `-D warnings`, тесты;
 //! - `cargo xtask bench-check [--threshold <проценты>] [--dir <каталог criterion>]` —
 //!   проверяет результаты `cargo bench -- --baseline <имя>` и падает, если среднее время
-//!   любого бенчмарка выросло больше порога (по умолчанию 5 %).
+//!   любого бенчмарка выросло больше порога (по умолчанию 5 %);
+//! - `cargo xtask guest-fetch --kernel-build <ID>` — скачать ядро GKI (android15-6.6,
+//!   `kernel_virt_x86_64`) с ci.android.com в `guest/cache/`;
+//! - `cargo xtask busybox-initramfs` — собрать initramfs с busybox для проверки этапа 1.
 
 #![allow(
     clippy::print_stdout,
@@ -17,6 +20,9 @@ use std::process::Command;
 
 use anyhow::{Context, Result, bail};
 
+mod cpio;
+mod guest;
+
 const DEFAULT_THRESHOLD_PERCENT: f64 = 5.0;
 
 fn main() -> Result<()> {
@@ -24,8 +30,13 @@ fn main() -> Result<()> {
     match args.first().map(String::as_str) {
         Some("ci") => ci(),
         Some("bench-check") => bench_check(args.get(1..).unwrap_or_default()),
+        Some("guest-fetch") => guest::fetch_kernel(args.get(1..).unwrap_or_default()),
+        Some("busybox-initramfs") => guest::busybox_initramfs(args.get(1..).unwrap_or_default()),
         _ => {
-            eprintln!("использование: cargo xtask <ci | bench-check [--threshold N] [--dir PATH]>");
+            eprintln!(
+                "использование: cargo xtask <ci | bench-check [--threshold N] [--dir PATH] | \
+                 guest-fetch --kernel-build ID [--sha256 HEX] | busybox-initramfs [--out PATH]>"
+            );
             bail!("неизвестная команда")
         }
     }

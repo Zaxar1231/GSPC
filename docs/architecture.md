@@ -93,8 +93,10 @@ sequenceDiagram
   затем prefault, затем `WHvMapGpaRange`. Dirty tracking — для снапшотов.
 - **Загрузка:** bzImage по 64-битному boot protocol (`boot_params`, identity page tables, GDT),
   initramfs и cmdline в RAM. Без BIOS и UEFI.
-- **Платформа:** ACPI (RSDP, XSDT, MADT, FADT, DSDT, MCFG), PCIe ECAM, IOAPIC, 16550 UART.
-  Устройства virtio-pci (modern) с MSI-X.
+- **Платформа:** ACPI hardware-reduced (RSDP, XSDT, MADT, FADT, DSDT; MCFG — с этапа 2),
+  без PIC/PIT/HPET/PM-таймера/RTC: таймер — LAPIC, часы — TSC, частоты берутся у гипервизора и
+  передаются ядру (`tsc_early_khz`, `lapic_timer_period`, `lpj`). PCIe ECAM, IOAPIC, 16550 UART
+  (описан в DSDT как `PNP0501`). Устройства virtio-pci (modern) с MSI-X — с этапа 2.
 
 ### Что берём готовым
 
@@ -102,14 +104,13 @@ sequenceDiagram
 |---|---|---|
 | `windows` | биндинги WinHvPlatform / WinHvEmulation, Win32, D3D12, DXGI | официальный крейт Microsoft |
 | `WinHvEmulation.dll` | декодирование инструкций MMIO/PIO | системная библиотека |
-| `linux-loader` | разбор bzImage, `boot_params` | при проблемах на Windows — свой загрузчик |
-| `vm-memory` | трейты гостевой памяти | Windows-бэкенд проверяется на этапе 1, при необходимости — своя реализация над `VirtualAlloc` |
-| `virtio-queue` | split virtqueue | |
 | `vm-superio` | 16550 UART | |
+| `virtio-queue` | split virtqueue | |
 | `smoltcp` | TCP/IP-стек для NAT | этап 5 |
 | gfxstream | декодер GPU-команд гостя | C++ через FFI, этап 4 |
 
-Пишем сами: обёртку WHPX, vCPU loop, ACPI, IOAPIC, PCI, virtio-pci транспорт, все устройства,
+Пишем сами: обёртку WHPX, vCPU loop, загрузчик bzImage и слой гостевой памяти
+([ADR 0007](adr/0007-own-loader-and-memory.md)), ACPI, IOAPIC, PCI, virtio-pci транспорт, все устройства,
 композитор, ввод, keymapping, UI, обновления.
 
 ## Путь кадра (этапы 3–4)

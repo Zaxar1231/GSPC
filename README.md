@@ -16,8 +16,9 @@ keymapping уровня BlueStacks. Производительность — п�
 </div>
 
 > [!WARNING]
-> Проект на ранней стадии (этап 0: репозиторий, workspace, CI). Запускать пока нечего:
-> VMM появится на этапе 1. Следите за [roadmap](docs/roadmap.md).
+> Проект на ранней стадии (этап 1: минимальный VMM). Уже можно загрузить ядро Linux с
+> initramfs и получить шелл в консоли — см. [docs/stage-1.md](docs/stage-1.md). Android и окно
+> с экраном появятся на этапах 2–3.
 
 ![Скриншот (заглушка)](docs/assets/screenshot-placeholder.svg)
 
@@ -35,6 +36,7 @@ keymapping уровня BlueStacks. Производительность — п�
   MOBA-скиллы, геймпад. Визуальный редактор, автопереключение профилей по игре.
 - **Импорт раскладок BlueStacks.**
 - **Мультиинстанс и снапшоты.** Старт из снапшота меньше чем за 5 секунд.
+- **Интерфейс в стиле Material Design 3**: светлая и тёмная темы, палитра из акцентного цвета Windows.
 - **Нормальный продукт.** Установщик, автообновление (stable/beta), откат, отчёты о сбоях.
 
 ## Системные требования
@@ -58,7 +60,17 @@ Windows Hypervisor Platform (UAC запросится только на этот
 
 ## Быстрый старт
 
-Появится с первой рабочей сборкой (этапы 1–3).
+Сейчас (этап 1) — загрузка ядра Linux в консоли, подробно в [docs/stage-1.md](docs/stage-1.md):
+
+```powershell
+cargo build --release
+.\target\release\rustdroid.exe check
+cargo xtask busybox-initramfs
+cargo xtask guest-fetch --kernel-build <НОМЕР_СБОРКИ>
+.\target\release\rustdroid.exe boot --kernel guest\cache\bzImage-<НОМЕР_СБОРКИ> --initrd guest\cache\initramfs-busybox.cpio
+```
+
+Выход из консоли гостя: `Ctrl+A`, затем `X`.
 
 ## Сборка из исходников
 
@@ -138,8 +150,8 @@ Hyper-V), перестанут запускаться или будут рабо
 
 | Этап | Содержание | Статус |
 |---|---|---|
-| 0 | Репозиторий, workspace, CI, документация | 🚧 |
-| 1 | Минимальный VMM на WHPX: ядро Linux + initramfs, serial-консоль | ⏳ |
+| 0 | Репозиторий, workspace, CI, документация | ✅ |
+| 1 | Минимальный VMM на WHPX: ядро Linux + initramfs, serial-консоль | 🚧 |
 | 2 | virtio-pci/MSI-X, virtio-blk, virtio-console: AOSP до шелла | ⏳ |
 | 3 | virtio-gpu 2D, D3D12-композитор, virtio-input, оверлей производительности | ⏳ |
 | 4 | 3D: gfxstream + ANGLE-on-Vulkan | ⏳ |

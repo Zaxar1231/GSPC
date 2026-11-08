@@ -16,7 +16,8 @@ BlueStacks-class keymapping. Performance is priority #1.
 </div>
 
 > [!WARNING]
-> Early stage (stage 0: repository, workspace, CI). Nothing runnable yet: the VMM arrives in stage 1.
+> Early stage (stage 1: minimal VMM). A Linux kernel with initramfs boots to a serial shell — see
+> [docs/stage-1.md](docs/stage-1.md) (RU). Android and the display window arrive in stages 2–3.
 > Primary documentation is in Russian.
 
 ![Screenshot (placeholder)](docs/assets/screenshot-placeholder.svg)
@@ -33,6 +34,7 @@ BlueStacks-class keymapping. Performance is priority #1.
   Target: < 30 ms at ≥ 90 FPS or VRR, < 45 ms at 60 Hz with VSync.
 - **Keymapping**, visual editor, per-game profiles, **BlueStacks layout import**.
 - **Multi-instance and snapshots**, start from a snapshot in < 5 s.
+- **Material Design 3 UI**, light and dark themes.
 - **A real product:** installer, auto-update (stable/beta), rollback, crash reports.
 
 ## System requirements
