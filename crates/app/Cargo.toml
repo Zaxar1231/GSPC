@@ -15,9 +15,21 @@ path = "src/main.rs"
 
 [dependencies]
 anyhow.workspace = true
+clap.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
-rustdroid-instance.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+rustdroid-devices.workspace = true
+rustdroid-vmm.workspace = true
+rustdroid-whpx.workspace = true
+windows = { workspace = true, features = [
+    "Wdk_System_SystemServices",
+    "Win32_Foundation",
+    "Win32_System_Console",
+    "Win32_System_SystemInformation",
+    "Win32_System_Threading",
+] }
 
 [lints]
 workspace = true
