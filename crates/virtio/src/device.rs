@@ -7,6 +7,10 @@ use crate::queue::{Queue, QueueError};
 pub const TYPE_BLOCK: u32 = 2;
 /// Тип устройства virtio-console.
 pub const TYPE_CONSOLE: u32 = 3;
+/// Тип устройства virtio-gpu.
+pub const TYPE_GPU: u32 = 16;
+/// Тип устройства virtio-input.
+pub const TYPE_INPUT: u32 = 18;
 
 /// Возможность: устройство соответствует virtio 1.x.
 pub const VIRTIO_F_VERSION_1: u64 = 1 << 32;

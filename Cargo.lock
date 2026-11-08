@@ -467,7 +467,10 @@ dependencies = [
  "anyhow",
  "clap",
  "rustdroid-devices",
+ "rustdroid-gpu",
+ "rustdroid-input",
  "rustdroid-instance",
+ "rustdroid-present",
  "rustdroid-vmm",
  "rustdroid-whpx",
  "tracing",
@@ -492,6 +495,10 @@ dependencies = [
 [[package]]
 name = "rustdroid-gpu"
 version = "0.0.1"
+dependencies = [
+ "rustdroid-virtio",
+ "tracing",
+]
 
 [[package]]
 name = "rustdroid-guest-agent"
@@ -518,6 +525,13 @@ dependencies = [
 [[package]]
 name = "rustdroid-present"
 version = "0.0.1"
+dependencies = [
+ "rustdroid-gpu",
+ "rustdroid-telemetry",
+ "thiserror",
+ "tracing",
+ "windows",
+]
 
 [[package]]
 name = "rustdroid-telemetry"
@@ -543,6 +557,7 @@ name = "rustdroid-vmm"
 version = "0.0.1"
 dependencies = [
  "rustdroid-devices",
+ "rustdroid-gpu",
  "rustdroid-virtio",
  "rustdroid-whpx",
  "thiserror",
