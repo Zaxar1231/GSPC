@@ -11,6 +11,8 @@ pub const TYPE_CONSOLE: u32 = 3;
 pub const TYPE_GPU: u32 = 16;
 /// Тип устройства virtio-input.
 pub const TYPE_INPUT: u32 = 18;
+/// Тип устройства virtio-vsock.
+pub const TYPE_VSOCK: u32 = 19;
 
 /// Возможность: устройство соответствует virtio 1.x.
 pub const VIRTIO_F_VERSION_1: u64 = 1 << 32;
@@ -41,6 +43,14 @@ pub trait VirtioDevice: Send {
 
     /// Reset устройства драйвером.
     fn reset(&mut self) {}
+
+    /// Очереди, которые нужно обработать после текущей (битовая маска; бит `i` — очередь `i`).
+    ///
+    /// Нужна устройствам, у которых обработка одной очереди порождает работу в другой
+    /// (virtio-vsock: пакет в transmitq → ответ в receiveq). Вызов сбрасывает маску.
+    fn take_pending_queues(&mut self) -> u64 {
+        0
+    }
 
     /// Обрабатывает очередь `index`. Возвращает `true`, если в used ring что-то добавлено.
     ///

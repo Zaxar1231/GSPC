@@ -34,7 +34,7 @@ param(
     [string]$Display = '1280x720@60',
     [int]$Stage1Seconds = 30,
     [int]$Stage2Seconds = 300,
-    [int]$Stage3Seconds = 420,
+    [int]$Stage3Seconds = 600,
     [string]$CfBuild = 'latest',
     [string]$KernelBuild = 'latest',
     [switch]$SkipBuild,
@@ -353,7 +353,8 @@ if ($Stages -contains 2 -and $images -and (Test-Path $Exe)) {
     Step "Этап 2: Android в консоли ($Stage2Seconds с)"
     $serial = Join-Path $Out 'stage2-serial.log'
     $rc = Run-Vm 'stage2' @('boot-android', '--images', $images, '--instance', 'hwtest', '--reset',
-        '--memory', "$Memory", '--cpus', "$Cpus", '--timeout', "$Stage2Seconds", '--serial-log', $serial, '-v') $Stage2Seconds $null
+        '--memory', "$Memory", '--cpus', "$Cpus", '--timeout', "$Stage2Seconds", '--serial-log', $serial,
+        '--logcat', (Join-Path $Out 'stage2-logcat.txt'), '-v') $Stage2Seconds $null
     Say "  код выхода: $rc"
     Report-Android 'stage2' $serial
 }
@@ -385,7 +386,7 @@ if ($Stages -contains 3 -and $images -and (Test-Path $Exe)) {
     }
     $rc = Run-Vm 'stage3' @('boot-android', '--images', $images, '--instance', 'hwtest',
         '--memory', "$Memory", '--cpus', "$Cpus", '--display', $Display, '--timeout', "$Stage3Seconds",
-        '--serial-log', $serial, '-v') $Stage3Seconds $snap
+        '--serial-log', $serial, '--logcat', (Join-Path $Out 'stage3-logcat.txt'), '-v') $Stage3Seconds $snap
     Say "  код выхода: $rc"
     Report-Android 'stage3' $serial
 

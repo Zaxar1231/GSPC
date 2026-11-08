@@ -314,6 +314,14 @@ pub const VENDOR_APEX_DEFAULTS: &[(&str, &str)] = &[
     ),
 ];
 
+/// Параметры HAL Cuttlefish по умолчанию (`launch_cvd` задаёт их сам).
+pub const CUTTLEFISH_HAL_DEFAULTS: &[(&str, &str)] = &[
+    ("androidboot.vsock_lights_port", "6900"),
+    ("androidboot.modem_simulator_ports", "9600"),
+    ("androidboot.openthread_node_id", "1"),
+    ("androidboot.wifi_mac_prefix", "5554"),
+];
+
 /// Параметры bootconfig RustDroid поверх vendor bootconfig.
 ///
 /// `boot_device` — путь PCI диска с разделами, например `pci0000:00/0000:00:01.0`.
@@ -341,6 +349,13 @@ pub fn rustdroid_bootconfig(vendor: &str, boot_device: &str, console: &str) -> B
         let key = format!("androidboot.vendor.apex.{module}");
         if bc.get(&key).is_none() {
             bc.set(&key, choice);
+        }
+    }
+    // Параметры, которые HAL Cuttlefish читают из ro.boot.* и без которых завершаются:
+    // подсветка — vsock-сервер в госте, RIL — клиент модема на хосте (vsock), Thread — номер узла.
+    for (key, value) in CUTTLEFISH_HAL_DEFAULTS {
+        if bc.get(key).is_none() {
+            bc.set(key, value);
         }
     }
     // Первый этап init ищет `fstab.<suffix>`: у Cuttlefish в vendor ramdisk лежат только
@@ -438,6 +453,7 @@ mod tests {
         assert_eq!(bc.get("androidboot.console"), Some("ttyS0"));
         assert_eq!(bc.get("androidboot.hardware"), Some("cutf_cvm"));
         assert_eq!(bc.get("androidboot.fstab_suffix"), Some("cf.f2fs.hctr2"));
+        assert_eq!(bc.get("androidboot.vsock_lights_port"), Some("6900"));
         assert_eq!(
             bc.get("androidboot.vendor.apex.com.android.hardware.gatekeeper"),
             Some("com.android.hardware.gatekeeper.nonsecure")

@@ -170,6 +170,10 @@ pub(crate) struct AndroidArgs {
     #[arg(long = "set")]
     pub bootconfig: Vec<String>,
 
+    /// Куда писать logcat гостя (по умолчанию logcat.txt в каталоге инстанса).
+    #[arg(long)]
+    pub logcat: Option<PathBuf>,
+
     #[command(flatten)]
     pub vm: VmArgs,
 }

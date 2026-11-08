@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 
 use rustdroid_devices::{
     CmosRtc, ConsoleInput, Disk, InputEvent, InputEvents, InputKind, Serial16550, VirtioBlk,
-    VirtioConsole, VirtioInput,
+    VirtioConsole, VirtioInput, VirtioVsock,
 };
 use rustdroid_gpu::{DisplayMode, Mailbox, VirtioGpu};
 use rustdroid_virtio::{GuestMemory, MsiMessage, MsiSink, VirtioPci};
@@ -61,6 +61,8 @@ pub struct VmConfig {
     pub large_pages: bool,
     /// `CONFIG_HZ` ядра гостя.
     pub guest_hz: u32,
+    /// Консоль ядра: `ttyS0` или `hvc0`.
+    pub kernel_console: String,
 }
 
 /// virtio-устройства ВМ.
@@ -68,8 +70,13 @@ pub struct VmConfig {
 pub struct VmDevices {
     /// Диски virtio-blk (по порядку слотов PCI, начиная с 00:01.0).
     pub disks: Vec<(String, Arc<dyn Disk>)>,
-    /// virtio-console: вывод и буфер ввода.
+    /// virtio-console: вывод и буфер ввода (`hvc0`).
     pub console: Option<(Box<dyn Write + Send>, Arc<ConsoleInput>)>,
+    /// Дополнительные virtio-console без ввода (`hvc1`, `hvc2`, … по порядку): имя и вывод.
+    /// Нумерация `hvcN` в госте идёт по порядку устройств, поэтому они сразу за `hvc0`.
+    pub extra_consoles: Vec<(String, Box<dyn Write + Send>)>,
+    /// virtio-vsock с указанным CID гостя.
+    pub vsock_cid: Option<u64>,
     /// virtio-gpu: режим дисплея и ящик кадров для композитора.
     pub gpu: Option<(DisplayMode, Arc<Mailbox>)>,
     /// virtio-input: вид устройства, имя и очередь событий.
@@ -88,6 +95,8 @@ impl std::fmt::Debug for VmDevices {
                     .collect::<Vec<_>>(),
             )
             .field("console", &self.console.is_some())
+            .field("extra_consoles", &self.extra_consoles.len())
+            .field("vsock_cid", &self.vsock_cid)
             .field("gpu", &self.gpu.as_ref().map(|(m, _)| *m))
             .field("inputs", &self.inputs.len())
             .finish()
@@ -388,6 +397,12 @@ impl Vm {
             }
             None => None,
         };
+        for (name, out) in devices.extra_consoles {
+            add(
+                name,
+                Box::new(VirtioConsole::new(out, Arc::new(ConsoleInput::default()))),
+            )?;
+        }
         if let Some((mode, mailbox)) = devices.gpu {
             add("gpu".into(), Box::new(VirtioGpu::new(mode, mailbox)))?;
         }
@@ -402,6 +417,9 @@ impl Vm {
                 function: f,
             });
         }
+        if let Some(cid) = devices.vsock_cid {
+            add("vsock".into(), Box::new(VirtioVsock::new(cid)))?;
+        }
         let pci = Arc::new(pci);
 
         // Ядро, ACPI, таблицы.
@@ -414,7 +432,7 @@ impl Vm {
         let cmdline = cfg
             .cmdline_override
             .clone()
-            .unwrap_or_else(|| cmdline::build(&timing, &cfg.cmdline_extra));
+            .unwrap_or_else(|| cmdline::build(&timing, &cfg.kernel_console, &cfg.cmdline_extra));
         #[allow(clippy::cast_possible_truncation, reason = "cpus ≤ 64")]
         let acpi_cfg = AcpiConfig {
             cpus: cfg.cpus as u8,

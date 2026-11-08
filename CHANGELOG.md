@@ -19,6 +19,9 @@
   `userdata.img` в архивах Cuttlefish — Android sparse. Добавлен `SparseDisk`: чтение sparse-образов
   без распаковки, индекс чанков строится за доли миллисекунды.
 - Окно до первого кадра гостя было белым, теперь чёрное.
+- Android доходил до загрузочной анимации, но не загружался: HAL Cuttlefish (подсветка, датчики,
+  oemlock, UWB, Thread, BT, NFC, RIL) завершались без своих каналов `/dev/hvcN`, vsock и
+  параметров `ro.boot.*`, и после четырёх падений до конца загрузки init перезапускал zygote.
 - Android 17 перезагружался с `bootstrap-apexd-failed`: у Cuttlefish часть HAL поставляется
   несколькими вариантами одного APEX, и выбор задаёт `launch_cvd`. Теперь bootconfig по
   умолчанию выбирает `gatekeeper.nonsecure`, `keymint.rust_nonsecure`, `composer.ranchu` и
@@ -27,6 +30,13 @@
 
 ### Added
 
+- virtio-vsock (CID гостя 3). Хост пока принимает подключения гостя и молча читает данные:
+  этого хватает HAL Cuttlefish (подсветка, модем RIL), настоящие сервисы хоста — этап 5.
+- Android: 20 консолей virtio как у Cuttlefish (`hvc0`…`hvc19`); консоль ядра и шелл — `hvc0`
+  вместо COM1 (вывод пачками, без выхода vCPU на каждый байт), logcat из `hvc2` пишется в файл
+  (`--logcat`, по умолчанию `logcat.txt` в каталоге инстанса).
+- bootconfig: `vsock_lights_port`, `modem_simulator_ports`, `openthread_node_id`,
+  `wifi_mac_prefix`; в режиме окна `androidboot.qemu.vsync` = частота дисплея гостя.
 - CMOS RTC (порты `0x70`/`0x71`): гость получает текущее время, ядро больше не опрашивает
   несуществующие часы (около 140 тысяч выходов vCPU за загрузку).
 - `cf-fetch` не распаковывает образы повторно, если они уже на месте.

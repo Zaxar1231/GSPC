@@ -26,7 +26,7 @@ powershell -ExecutionPolicy Bypass -File $env:TEMP\hw-test.ps1
 | Гость | busybox, ядро GKI и образы Cuttlefish x86_64 — последние удачные сборки с ci.android.com | — (~1,2 ГБ загрузки, ~6 ГБ на диске) |
 | Этап 1 | ядро Linux + busybox, 1 vCPU и SMP, по 30 секунд | — |
 | Этап 2 | Android в консоли без окна, 5 минут | — |
-| Этап 3 | Android в окне 1280×720 @ 60 Гц, до 7 минут, скриншоты окна раз в 30 секунд | тап, свайп, ввод с клавиатуры; ответить на вопросы |
+| Этап 3 | Android в окне 1280×720 @ 60 Гц, до 10 минут, скриншоты окна раз в 30 секунд | тап, свайп, ввод с клавиатуры; ответить на вопросы |
 | Итог | всё в `Рабочий стол\RustDroid-test-<дата>.zip` | прислать архив |
 
 ВМ останавливается сама (`--timeout`), окно можно закрыть раньше.
@@ -44,7 +44,7 @@ powershell -ExecutionPolicy Bypass -File scripts\hw-test.ps1 -SkipBuild         
 | `-Stages` | `1,2,3` | какие этапы проверять |
 | `-Memory` / `-Cpus` | `4096` / `4` | RAM (МиБ) и vCPU гостя Android |
 | `-Display` | `1280x720@60` | окно этапа 3 |
-| `-Stage2Seconds` / `-Stage3Seconds` | `300` / `420` | сколько работает ВМ |
+| `-Stage2Seconds` / `-Stage3Seconds` | `300` / `600` | сколько работает ВМ |
 | `-CfBuild` / `-KernelBuild` | `latest` | номер сборки ci.android.com |
 | `-Branch` | `feat/stage-3-display-input` | ветка репозитория |
 | `-Yes` | — | не задавать вопросов (без ответов на этапе 3) |
@@ -54,7 +54,7 @@ powershell -ExecutionPolicy Bypass -File scripts\hw-test.ps1 -SkipBuild         
 - `summary.txt` — краткий итог `OK` / `WARN` / `FAIL` по шагам;
 - `system.txt` — железо и версия Windows (без имени компьютера); имя пользователя в путях заменено на `<user>`;
 - `build.log`, `check.log`, `fetch.log`;
-- `stageN-serial.log` — консоль гостя, `stageN-stderr.log` — лог RustDroid (`-v`);
+- `stageN-serial.log` — консоль гостя, `stageN-logcat.txt` — logcat Android, `stageN-stderr.log` — лог RustDroid (`-v`);
 - `stage3-frames.txt` — строки `кадры гостя` (FPS, 1% low, время кадра, задержка);
 - `stage3-shot-NN.png` — скриншоты окна RustDroid (только окна, не всего экрана);
 - `stage3-answers.txt` — ваши ответы.

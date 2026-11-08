@@ -186,7 +186,7 @@ fn open_log(path: Option<&PathBuf>) -> Result<ConsoleOut> {
     Ok(ConsoleOut { log })
 }
 
-fn base_config(vm: &VmArgs, kernel: PathBuf) -> VmConfig {
+fn base_config(vm: &VmArgs, console: ConsoleKind, kernel: PathBuf) -> VmConfig {
     VmConfig {
         kernel,
         initrd: None,
@@ -197,12 +197,16 @@ fn base_config(vm: &VmArgs, kernel: PathBuf) -> VmConfig {
         cmdline_override: None,
         large_pages: vm.large_pages,
         guest_hz: vm.guest_hz,
+        kernel_console: match console {
+            ConsoleKind::Serial => "ttyS0".into(),
+            ConsoleKind::Hvc => "hvc0".into(),
+        },
     }
 }
 
-fn run_vm(cfg: &VmConfig, mut devices: VmDevices, vm: &VmArgs) -> Result<()> {
+fn run_vm(cfg: &VmConfig, mut devices: VmDevices, vm: &VmArgs, console: ConsoleKind) -> Result<()> {
     let out = open_log(vm.serial_log.as_ref())?;
-    if vm.console == ConsoleKind::Hvc {
+    if console == ConsoleKind::Hvc {
         devices.console = Some((Box::new(out.clone()), Arc::new(ConsoleInput::default())));
     }
     let display = vm
@@ -217,7 +221,7 @@ fn run_vm(cfg: &VmConfig, mut devices: VmDevices, vm: &VmArgs) -> Result<()> {
     tracing::info!(cmdline = machine.cmdline(), "командная строка ядра");
     tracing::info!("Консоль гостя ниже. Выход: Ctrl+A, затем X (или закройте окно).");
 
-    let target = match (vm.console, machine.console()) {
+    let target = match (console, machine.console()) {
         (ConsoleKind::Hvc, Some(h)) => InputTarget::Hvc(h),
         _ => InputTarget::Serial(machine.serial()),
     };
@@ -263,7 +267,7 @@ fn open_disk(spec: &DiskSpec) -> Result<Arc<dyn Disk>> {
 
 /// `rustdroid boot`.
 pub(crate) fn boot(args: &BootArgs) -> Result<()> {
-    let mut cfg = base_config(&args.vm, args.kernel.clone());
+    let mut cfg = base_config(&args.vm, args.vm.console, args.kernel.clone());
     cfg.initrd.clone_from(&args.initrd);
     cfg.cmdline_override.clone_from(&args.cmdline);
     let mut devices = VmDevices::default();
@@ -274,7 +278,7 @@ pub(crate) fn boot(args: &BootArgs) -> Result<()> {
             open_disk(&spec)?,
         ));
     }
-    run_vm(&cfg, devices, &args.vm)
+    run_vm(&cfg, devices, &args.vm, args.vm.console)
 }
 
 fn read(path: &Path) -> Result<Vec<u8>> {
@@ -344,17 +348,19 @@ pub(crate) fn boot_android(args: &AndroidArgs) -> Result<()> {
         tracing::debug!(partition = %name, start, mib = span >> 20, "раздел");
     }
 
+    // Консоль Android — всегда virtio-console hvc0: вывод пачками, без выхода vCPU на каждый
+    // байт, и нумерация hvcN совпадает с Cuttlefish (HAL ждут свои порты на hvc2…hvc19).
     // Диск — первое устройство PCI: 00:01.0.
-    let console = match args.vm.console {
-        ConsoleKind::Serial => "ttyS0",
-        ConsoleKind::Hvc => "hvc0",
-    };
     let mut bootconfig =
-        rustdroid_bootconfig(&vendor_img.bootconfig, "pci0000:00/0000:00:01.0", console);
-    if args.vm.display.is_some() {
+        rustdroid_bootconfig(&vendor_img.bootconfig, "pci0000:00/0000:00:01.0", "hvc0");
+    if let Some(spec) = args.vm.display.as_deref() {
         // Программный рендер в госте (SwiftShader/ANGLE) и композитор через DRM virtio-gpu.
         for (k, v) in display::GUEST_SWIFTSHADER {
             bootconfig.set(k, v);
+        }
+        // Частота vsync композитора ranchu — частота дисплея гостя.
+        if let Ok(d) = DisplaySpec::parse(spec) {
+            bootconfig.set("androidboot.qemu.vsync", &d.refresh_hz.to_string());
         }
     }
     for kv in &args.bootconfig {
@@ -368,12 +374,16 @@ pub(crate) fn boot_android(args: &AndroidArgs) -> Result<()> {
     initrd.extend_from_slice(generic_ramdisk);
     let initrd = append_bootconfig(initrd, &bootconfig.render());
 
-    let mut cfg = base_config(&args.vm, kernel);
+    let mut cfg = base_config(&args.vm, ConsoleKind::Hvc, kernel);
     cfg.initrd_data = Some(Arc::new(initrd));
+    let needs_bootconfig = !vendor_img
+        .cmdline
+        .split_whitespace()
+        .any(|p| p == "bootconfig");
     cfg.cmdline_extra = [
         vendor_img.cmdline.as_str(),
         boot_img.cmdline.as_str(),
-        "bootconfig",
+        if needs_bootconfig { "bootconfig" } else { "" },
         args.vm.append.as_str(),
     ]
     .iter()
@@ -383,10 +393,37 @@ pub(crate) fn boot_android(args: &AndroidArgs) -> Result<()> {
     .join(" ");
     tracing::info!(images = %dir.display(), instance = %args.instance, "загрузка Android");
 
+    // hvc1…hvc19 как у Cuttlefish; в hvc2 Android пишет logcat (служба seriallogging).
+    let logcat_path = args
+        .logcat
+        .clone()
+        .unwrap_or_else(|| instance_dir.join("logcat.txt"));
+    let logcat = File::create(&logcat_path)
+        .with_context(|| format!("не удалось создать {}", logcat_path.display()))?;
+    tracing::info!(path = %logcat_path.display(), "logcat гостя");
+    let mut logcat = Some(logcat);
+    let extra_consoles = (1..CUTTLEFISH_CONSOLES)
+        .map(|n| {
+            let out: Box<dyn Write + Send> = match logcat.take_if(|_| n == LOGCAT_HVC) {
+                Some(f) => Box::new(f),
+                None => Box::new(std::io::sink()),
+            };
+            (format!("hvc{n}"), out)
+        })
+        .collect();
+
     let devices = VmDevices {
         disks: vec![("android".into(), Arc::new(disk))],
-        console: None,
+        extra_consoles,
+        vsock_cid: Some(GUEST_CID),
         ..VmDevices::default()
     };
-    run_vm(&cfg, devices, &args.vm)
+    run_vm(&cfg, devices, &args.vm, ConsoleKind::Hvc)
 }
+
+/// Число консолей virtio у Cuttlefish: hvc0…hvc19.
+const CUTTLEFISH_CONSOLES: u32 = 20;
+/// Консоль с logcat.
+const LOGCAT_HVC: u32 = 2;
+/// CID гостя virtio-vsock.
+const GUEST_CID: u64 = 3;
