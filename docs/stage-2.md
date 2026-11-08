@@ -58,12 +58,13 @@ cargo build --release
 
 ### Android
 
-1. На <https://ci.android.com> выберите ветку с Android 15 и таргет Cuttlefish x86_64 (например,
-   `aosp_cf_x86_64_phone-trunk_staging-userdebug`), возьмите номер зелёной сборки.
+1. По умолчанию берётся ветка `aosp-android-latest-release`, таргет
+   `aosp_cf_x86_64_only_phone-userdebug` (Android 17: публичных сборок Cuttlefish с Android 15
+   на ci.android.com больше нет). `latest` — последняя удачная сборка.
 2. Скачайте образы:
 
    ```powershell
-   cargo xtask cf-fetch --build <НОМЕР> [--target <ТАРГЕТ>]
+   cargo xtask cf-fetch --build <НОМЕР|latest> [--branch <ВЕТКА>] [--target <ТАРГЕТ>]
    # → guest\cache\cf-<НОМЕР>\ (boot.img, init_boot.img, vendor_boot.img, super.img, …)
    ```
 
@@ -73,6 +74,11 @@ cargo build --release
    .\target\release\rustdroid.exe boot-android `
        --images guest\cache\cf-<НОМЕР> --memory 4096 --cpus 2 --serial-log android.log -v
    ```
+
+`userdata.img` из архива Cuttlefish — заготовка на несколько МиБ (её расширяет `launch_cvd`), поэтому
+вместо неё подаётся пустой раздел 8 ГиБ: Android форматирует его при первой загрузке. В bootconfig
+по умолчанию добавляются `androidboot.fstab_suffix=cf.f2fs.hctr2` (иначе первый этап init не
+найдёт fstab) и `androidboot.vbmeta.device_state=unlocked`.
 
 Ожидаемый результат: лог ядра, `init: first stage`, монтирование `super`, второй этап `init` и
 приглашение шелла `console:/ $` на ttyS0 (в userdebug-сборках).

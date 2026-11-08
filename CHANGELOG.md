@@ -8,8 +8,24 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Образы Android по умолчанию: `aosp-android-latest-release` / `aosp_cf_x86_64_only_phone-userdebug`
+  (публичных сборок Cuttlefish x86_64 с Android 15 больше нет).
+- Слишком маленький `userdata.img` (заготовка Cuttlefish) заменяется пустым разделом 8 ГиБ;
+  в bootconfig по умолчанию `androidboot.fstab_suffix=cf.f2fs.hctr2`,
+  `androidboot.vbmeta.device_state=unlocked`, `androidboot.setupwizard_mode=DISABLED`.
+- PowerShell-скрипты сохраняются в UTF-8 с BOM (иначе Windows PowerShell 5.1 ломает кириллицу).
+
 ### Added
 
+- `scripts/hw-test.ps1`: проверка этапов 1–3 на реальном железе одним скриптом — установка
+  инструментов, сборка, загрузка образов, прогоны с таймаутом, скриншоты окна, архив с логами
+  ([docs/hardware-test.md](docs/hardware-test.md)).
+- `--timeout СЕКУНДЫ` для `boot` и `boot-android`: ВМ останавливается сама.
+- `cargo xtask guest-fetch --kernel-build latest`, `cargo xtask cf-fetch --build latest [--branch]`:
+  последняя удачная сборка с ci.android.com.
+- CI: проверка синтаксиса PowerShell-скриптов и UTF-8 BOM.
 - Этап 3: экран и ввод.
   - virtio-gpu 2D: ресурсы, backing, transfer, scanout, flush, фенсы; EDID (CVT-RB) с частотой
     дисплея гостя 60–144+ Гц.

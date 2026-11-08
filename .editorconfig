@@ -17,5 +17,9 @@ trim_trailing_whitespace = false
 [*.{ps1,bat,cmd,iss,wxs,sln,vcxproj}]
 end_of_line = crlf
 
+# Windows PowerShell 5.1 читает файлы без BOM в кодировке ANSI и ломает кириллицу.
+[*.ps1]
+charset = utf-8-bom
+
 [Makefile]
 indent_style = tab

@@ -10,13 +10,17 @@
 | Что | Ветка / таргет | Файлы |
 |---|---|---|
 | Ядро | `aosp_kernel-common-android15-6.6`, таргет `kernel_virt_x86_64` | `bzImage`, `initramfs.img`, модули |
-| Образы Android | ветка с Android 15 для Cuttlefish, таргет `aosp_cf_x86_64_phone-*-userdebug` | `*-img-*.zip` (super, vendor_boot, init_boot, userdata…), `cvd-host_package.tar.gz` не нужен |
+| Образы Android | `aosp-android-latest-release`, таргет `aosp_cf_x86_64_only_phone-userdebug` | `*-img-*.zip` (super, vendor_boot, init_boot, userdata…), `cvd-host_package.tar.gz` не нужен |
 
-Точные ветки фиксируются на этапе 2 по фактической доступности сборок: с 2025 года AOSP
-публикует исходники Android крупными релизами, и набор публичных веток на ci.android.com меняется.
+На ci.android.com публичные сборки Cuttlefish x86_64 остались только в ветке
+`aosp-android-latest-release`: сейчас это Android 17 с ядром 6.12 в `boot.img`. Android 15 на
+GKI 6.6 из ТЗ потребует своей сборки (фаза 2). Для проверки VMM на этапах 1–3 версия Android не
+важна: загрузчик, virtio и bootconfig одинаковы.
 
-Загрузка будет автоматизирована командой `cargo xtask guest-fetch` (этап 1): номер сборки, sha256
-каждого файла, проверка после скачивания. В репозиторий образы не коммитятся.
+Загрузка автоматизирована: `cargo xtask guest-fetch --kernel-build latest` и
+`cargo xtask cf-fetch --build latest`. Номер последней удачной сборки берётся из
+`https://ci.android.com/builds/branches/<ветка>/status.json`, после скачивания печатается sha256.
+В репозиторий образы не коммитятся.
 
 Что даёт фаза 1:
 - ядро с virtio-драйверами (virtio-pci, blk, console, gpu, input, net, vsock, snd);

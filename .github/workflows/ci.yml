@@ -62,6 +62,26 @@ jobs:
         env:
           RUSTDOCFLAGS: -D warnings
 
+  powershell:
+    name: powershell
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Синтаксис скриптов в Windows PowerShell 5.1 и наличие BOM
+        shell: powershell
+        run: |
+          $bad = 0
+          foreach ($f in Get-ChildItem scripts -Filter *.ps1) {
+            $bytes = [IO.File]::ReadAllBytes($f.FullName)
+            if ($bytes.Length -lt 3 -or $bytes[0] -ne 0xEF -or $bytes[1] -ne 0xBB -or $bytes[2] -ne 0xBF) {
+              Write-Host "::error file=$($f.Name)::нет UTF-8 BOM"; $bad++
+            }
+            $errs = $null
+            [Management.Automation.Language.Parser]::ParseFile($f.FullName, [ref]$null, [ref]$errs) | Out-Null
+            foreach ($e in $errs) { Write-Host "::error file=$($f.Name),line=$($e.Extent.StartLineNumber)::$($e.Message)"; $bad++ }
+          }
+          if ($bad) { exit 1 }
+
   deny:
     name: cargo-deny
     # Действие работает в Linux-контейнере; проверяется граф зависимостей для Windows-цели (deny.toml).

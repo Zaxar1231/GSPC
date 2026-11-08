@@ -61,20 +61,28 @@ Windows Hypervisor Platform (UAC запросится только на этот
 
 ## Быстрый старт
 
-Сейчас (этап 1) — загрузка ядра Linux в консоли, подробно в [docs/stage-1.md](docs/stage-1.md):
+**Проверка на своём компьютере одним скриптом** (поставит инструменты, соберёт, прогонит этапы 1–3
+и сложит логи в архив на рабочем столе), подробно в [docs/hardware-test.md](docs/hardware-test.md):
+
+```powershell
+irm https://raw.githubusercontent.com/Zaxar1231/GSPC/feat/stage-3-display-input/scripts/hw-test.ps1 -OutFile $env:TEMP\hw-test.ps1
+powershell -ExecutionPolicy Bypass -File $env:TEMP\hw-test.ps1
+```
+
+Вручную. Этап 1 — загрузка ядра Linux в консоли, подробно в [docs/stage-1.md](docs/stage-1.md):
 
 ```powershell
 cargo build --release
 .\target\release\rustdroid.exe check
 cargo xtask busybox-initramfs
-cargo xtask guest-fetch --kernel-build <НОМЕР_СБОРКИ>
+cargo xtask guest-fetch --kernel-build latest
 .\target\release\rustdroid.exe boot --kernel guest\cache\bzImage-<НОМЕР_СБОРКИ> --initrd guest\cache\initramfs-busybox.cpio
 ```
 
 Android из образов Cuttlefish (этап 2), подробно в [docs/stage-2.md](docs/stage-2.md):
 
 ```powershell
-cargo xtask cf-fetch --build <НОМЕР_СБОРКИ>
+cargo xtask cf-fetch --build latest
 .\target\release\rustdroid.exe boot-android --images guest\cache\cf-<НОМЕР_СБОРКИ> --memory 4096 --cpus 2
 # с окном, мышью и оверлеем (этап 3):
 .\target\release\rustdroid.exe boot-android --images guest\cache\cf-<НОМЕР_СБОРКИ> --memory 4096 --cpus 4 --display 1920x1080@120
