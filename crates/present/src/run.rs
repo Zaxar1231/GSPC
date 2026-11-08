@@ -9,7 +9,7 @@ use rustdroid_telemetry::FrameStats;
 use rustdroid_telemetry::overlay::OverlayData;
 
 use crate::d3d12::{PresentMode, Presenter};
-use crate::usage::UsageMeter;
+use crate::usage::{GuestRuntime, UsageMeter};
 use crate::window::WindowHandle;
 
 /// Настройки вывода.
@@ -26,7 +26,15 @@ pub struct PresentConfig {
 }
 
 /// Запускает композитор в текущем потоке до `stop`.
-pub fn run(window: WindowHandle, mailbox: &Arc<Mailbox>, stop: &AtomicBool, cfg: PresentConfig) {
+///
+/// `guest` — счётчик времени работы vCPU для строки `VCPU` оверлея.
+pub fn run(
+    window: WindowHandle,
+    mailbox: &Arc<Mailbox>,
+    stop: &AtomicBool,
+    cfg: PresentConfig,
+    guest: Option<GuestRuntime>,
+) {
     let _mmcss = MmcssGames::enter();
     let Some(first) = wait_first(mailbox, stop) else {
         return;
@@ -52,7 +60,7 @@ pub fn run(window: WindowHandle, mailbox: &Arc<Mailbox>, stop: &AtomicBool, cfg:
     let mut times: Vec<f32> = Vec::with_capacity(256);
     let mut next_deadline = Instant::now();
     let target_ms = 1000.0 / cfg.refresh_hz.max(1) as f32;
-    let mut meter = UsageMeter::default();
+    let mut meter = UsageMeter::new(guest);
     let mut usage = meter.update();
     let mut last_usage = Instant::now();
     let mut overlay = OverlayData {
@@ -128,6 +136,7 @@ pub fn run(window: WindowHandle, mailbox: &Arc<Mailbox>, stop: &AtomicBool, cfg:
                     p99_ms = format_args!("{:.2}", s.p99_frame_ms),
                     flush_to_present_ms = format_args!("{:.2}", l.avg_frame_ms),
                     ram_gib = format_args!("{:.2}", usage.working_set_gib),
+                    vcpu_pct = format_args!("{:.0}", usage.guest_cpu.unwrap_or(-1.0)),
                     cpu_pct = format_args!("{:.0}", usage.process_cpu),
                     system_cpu_pct = format_args!("{:.0}", usage.system_cpu),
                     "кадры гостя"

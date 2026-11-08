@@ -192,6 +192,29 @@ impl MsiSink for WhpxSink {
     }
 }
 
+/// Счётчик времени работы vCPU для оверлея (можно читать из любого потока).
+#[derive(Debug, Clone)]
+pub struct VcpuLoad {
+    partition: Arc<Partition>,
+    cpus: u32,
+}
+
+impl VcpuLoad {
+    /// Суммарное время работы всех vCPU, единицы по 100 нс.
+    #[must_use]
+    pub fn total_runtime_100ns(&self) -> Option<u64> {
+        (0..self.cpus)
+            .map(|i| self.partition.vcpu_runtime_100ns(i).ok())
+            .sum()
+    }
+
+    /// Число vCPU.
+    #[must_use]
+    pub fn cpus(&self) -> u32 {
+        self.cpus
+    }
+}
+
 /// Остановка ВМ из другого потока.
 #[derive(Debug, Clone)]
 pub struct Stopper {
@@ -506,6 +529,15 @@ impl Vm {
         Stopper {
             partition: Arc::clone(&self.partition),
             flag: Arc::clone(&self.stop),
+            cpus: self.cpus,
+        }
+    }
+
+    /// Счётчик загрузки vCPU.
+    #[must_use]
+    pub fn vcpu_load(&self) -> VcpuLoad {
+        VcpuLoad {
+            partition: Arc::clone(&self.partition),
             cpus: self.cpus,
         }
     }

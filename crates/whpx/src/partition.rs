@@ -275,6 +275,43 @@ impl Partition {
         })
     }
 
+    /// Сколько vCPU `index` проработал с создания, в единицах по 100 нс
+    /// (`WHvProcessorCounterSetRuntime.TotalRuntime100ns`). Время исполнения кода гостя
+    /// Windows не засчитывает ни процессу, ни системе, поэтому загрузку vCPU видно только так.
+    ///
+    /// # Errors
+    /// Ошибка WHPX.
+    pub fn vcpu_runtime_100ns(&self, index: u32) -> Result<u64> {
+        /// `WHV_PROCESSOR_RUNTIME_COUNTERS`.
+        #[repr(C)]
+        #[derive(Default)]
+        struct RuntimeCounters {
+            total_runtime_100ns: u64,
+            hypervisor_runtime_100ns: u64,
+        }
+        /// `WHvProcessorCounterSetRuntime`.
+        const COUNTER_SET_RUNTIME: i32 = 0;
+        let mut counters = RuntimeCounters::default();
+        let mut written = 0_u32;
+        #[allow(
+            clippy::cast_possible_truncation,
+            reason = "размер структуры — 16 байт"
+        )]
+        let size = size_of::<RuntimeCounters>() as u32;
+        // SAFETY: дескриптор валиден, буфер локальный и нужного размера.
+        check("WHvGetVirtualProcessorCounters", unsafe {
+            (self.api.get_vp_counters)(
+                self.handle,
+                index,
+                COUNTER_SET_RUNTIME,
+                (&raw mut counters).cast(),
+                size,
+                &raw mut written,
+            )
+        })?;
+        Ok(counters.total_runtime_100ns)
+    }
+
     /// Регистрирует doorbell: запись гостя по `gpa` сигналит `event` без выхода vCPU в user
     /// mode. Сопоставление идёт по адресу, при любой длине и значении записи.
     ///

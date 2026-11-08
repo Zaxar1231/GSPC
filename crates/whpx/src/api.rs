@@ -82,6 +82,15 @@ pub(crate) type FnRegisterDoorbell = unsafe extern "system" fn(
 pub(crate) type FnUnregisterDoorbell =
     unsafe extern "system" fn(WHV_PARTITION_HANDLE, *const WHV_DOORBELL_MATCH_DATA) -> HRESULT;
 
+/// `WHvGetVirtualProcessorCounters(partition, vp, counter_set, buffer, size, written)`.
+pub(crate) type FnGetVpCounters = unsafe extern "system" fn(
+    WHV_PARTITION_HANDLE,
+    u32,
+    i32,
+    *mut c_void,
+    u32,
+    *mut u32,
+) -> HRESULT;
 pub(crate) type FnEmulatorCreate =
     unsafe extern "system" fn(*const WHV_EMULATOR_CALLBACKS, *mut *mut c_void) -> HRESULT;
 pub(crate) type FnEmulatorDestroy = unsafe extern "system" fn(*const c_void) -> HRESULT;
@@ -119,6 +128,7 @@ pub(crate) struct Platform {
     pub translate_gva: FnTranslateGva,
     pub register_doorbell: FnRegisterDoorbell,
     pub unregister_doorbell: FnUnregisterDoorbell,
+    pub get_vp_counters: FnGetVpCounters,
 }
 
 /// Таблица функций `WinHvEmulation.dll`.
@@ -204,6 +214,7 @@ fn load_platform() -> Result<Platform> {
         translate_gva: sym!(m, l, "WHvTranslateGva"),
         register_doorbell: sym!(m, l, "WHvRegisterPartitionDoorbellEvent"),
         unregister_doorbell: sym!(m, l, "WHvUnregisterPartitionDoorbellEvent"),
+        get_vp_counters: sym!(m, l, "WHvGetVirtualProcessorCounters"),
     })
 }
 

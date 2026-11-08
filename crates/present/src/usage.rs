@@ -11,21 +11,33 @@ fn ticks(t: FILETIME) -> u64 {
     (u64::from(t.dwHighDateTime) << 32) | u64::from(t.dwLowDateTime)
 }
 
+/// Источник времени работы vCPU гостя: функция (сумма по vCPU, 100 нс) и число vCPU.
+pub type GuestRuntime = (Box<dyn FnMut() -> Option<u64> + Send>, u32);
+
 /// Измеритель загрузки: раз в интервал сравнивает снимки счётчиков.
-#[derive(Debug)]
 pub struct UsageMeter {
     started: Instant,
     cpus: u32,
+    guest: Option<GuestRuntime>,
     prev: Option<UsageSample>,
     last: Usage,
 }
 
-impl Default for UsageMeter {
-    fn default() -> Self {
+impl std::fmt::Debug for UsageMeter {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("UsageMeter").finish_non_exhaustive()
+    }
+}
+
+impl UsageMeter {
+    /// Измеритель; `guest` — счётчик времени работы vCPU, если есть.
+    #[must_use]
+    pub fn new(guest: Option<GuestRuntime>) -> Self {
         Self {
             started: Instant::now(),
             cpus: std::thread::available_parallelism()
                 .map_or(1, |n| u32::try_from(n.get()).unwrap_or(u32::MAX)),
+            guest,
             prev: None,
             last: Usage::default(),
         }
@@ -37,14 +49,15 @@ impl UsageMeter {
     pub fn update(&mut self) -> Usage {
         if let Some(now) = self.sample() {
             if let Some(prev) = &self.prev {
-                self.last = Usage::between(prev, &now, self.cpus);
+                let vcpus = self.guest.as_ref().map_or(1, |g| g.1);
+                self.last = Usage::between(prev, &now, self.cpus, vcpus);
             }
             self.prev = Some(now);
         }
         self.last
     }
 
-    fn sample(&self) -> Option<UsageSample> {
+    fn sample(&mut self) -> Option<UsageSample> {
         // SAFETY: псевдо-дескриптор текущего процесса, закрывать не нужно.
         let process = unsafe { GetCurrentProcess() };
         let (mut creation, mut exit, mut kernel, mut user) = Default::default();
@@ -86,6 +99,7 @@ impl UsageMeter {
             system_kernel: ticks(s_kernel),
             system_user: ticks(s_user),
             working_set: mem.WorkingSetSize as u64,
+            guest_runtime: self.guest.as_mut().and_then(|g| (g.0)()),
         })
     }
 }

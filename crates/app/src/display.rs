@@ -134,11 +134,15 @@ pub(crate) fn run(machine: Vm, screen: Screen, vm: &VmArgs) -> Result<(RunOutcom
         overlay: !vm.no_overlay,
         refresh_hz: screen.spec.refresh_hz,
     };
+    let load = machine.vcpu_load();
+    let vcpus = load.cpus();
+    let guest: rustdroid_present::usage::GuestRuntime =
+        (Box::new(move || load.total_runtime_100ns()), vcpus);
     let present = {
         let (mailbox, stop) = (Arc::clone(&screen.mailbox), Arc::clone(&stop));
         std::thread::Builder::new()
             .name("present".into())
-            .spawn(move || rustdroid_present::run::run(win, &mailbox, &stop, cfg))
+            .spawn(move || rustdroid_present::run::run(win, &mailbox, &stop, cfg, Some(guest)))
             .context("не удалось запустить поток композитора")?
     };
     let vm_thread = std::thread::Builder::new()
