@@ -7,8 +7,8 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use rustdroid_devices::{
-    ConsoleInput, Disk, InputEvent, InputEvents, InputKind, Serial16550, VirtioBlk, VirtioConsole,
-    VirtioInput,
+    CmosRtc, ConsoleInput, Disk, InputEvent, InputEvents, InputKind, Serial16550, VirtioBlk,
+    VirtioConsole, VirtioInput,
 };
 use rustdroid_gpu::{DisplayMode, Mailbox, VirtioGpu};
 use rustdroid_virtio::{GuestMemory, MsiMessage, MsiSink, VirtioPci};
@@ -256,6 +256,7 @@ pub struct Vm {
     _workers: Vec<DeviceWorker>,
     partition: Arc<Partition>,
     serial: Arc<Mutex<Serial16550>>,
+    rtc: Arc<Mutex<CmosRtc>>,
     ioapic: Arc<Mutex<IoApic>>,
     pci: Arc<PciBus>,
     console: Option<ConsoleHandle>,
@@ -451,6 +452,7 @@ impl Vm {
             _workers: workers,
             partition,
             serial,
+            rtc: Arc::new(Mutex::new(CmosRtc::default())),
             ioapic,
             pci,
             console,
@@ -502,6 +504,7 @@ impl Vm {
         PlatformBus::new(
             Arc::clone(&self.ram),
             Arc::clone(&self.serial),
+            Arc::clone(&self.rtc),
             Arc::clone(&self.ioapic),
             Arc::clone(&self.pci),
             Arc::clone(&self.events),

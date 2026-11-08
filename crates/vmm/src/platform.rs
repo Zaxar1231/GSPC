@@ -7,7 +7,8 @@ use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 
-use rustdroid_devices::{InterruptLine, Serial16550};
+use rustdroid_devices::rtc::{RTC_DATA_PORT, RTC_INDEX_PORT};
+use rustdroid_devices::{CmosRtc, InterruptLine, Serial16550};
 
 use crate::ioapic::{InterruptSink, IoApic};
 use crate::layout::{ECAM_ADDR, ECAM_SIZE, IOAPIC_ADDR, IOAPIC_SIZE};
@@ -83,6 +84,7 @@ impl InterruptLine for IoApicLine {
 pub struct PlatformBus {
     ram: Arc<GuestRam>,
     serial: Arc<Mutex<Serial16550>>,
+    rtc: Arc<Mutex<CmosRtc>>,
     ioapic: Arc<Mutex<IoApic>>,
     pci: Arc<PciBus>,
     events: Arc<VmEvents>,
@@ -101,6 +103,7 @@ impl PlatformBus {
     pub fn new(
         ram: Arc<GuestRam>,
         serial: Arc<Mutex<Serial16550>>,
+        rtc: Arc<Mutex<CmosRtc>>,
         ioapic: Arc<Mutex<IoApic>>,
         pci: Arc<PciBus>,
         events: Arc<VmEvents>,
@@ -108,6 +111,7 @@ impl PlatformBus {
         Self {
             ram,
             serial,
+            rtc,
             ioapic,
             pci,
             events,
@@ -138,6 +142,15 @@ impl PlatformBus {
                     *b = serial.read(off);
                 }
             }
+            RTC_INDEX_PORT | RTC_DATA_PORT => {
+                if let Some(b) = data.first_mut() {
+                    *b = self
+                        .rtc
+                        .lock()
+                        .unwrap_or_else(PoisonError::into_inner)
+                        .read(port);
+                }
+            }
             // i8042: нет данных, буферы пусты.
             I8042_DATA | I8042_COMMAND => {}
             // NMI status / POST-порт.
@@ -166,6 +179,11 @@ impl PlatformBus {
                 tracing::info!("гость запросил перезагрузку (i8042)");
                 self.events.reset.store(true, Ordering::Release);
             }
+            RTC_INDEX_PORT | RTC_DATA_PORT => self
+                .rtc
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .write(port, value),
             I8042_DATA | I8042_COMMAND | 0x61 | 0x80 => {}
             _ => {
                 self.events.unknown_pio.fetch_add(1, Ordering::Relaxed);
@@ -301,6 +319,7 @@ mod tests {
             PlatformBus::new(
                 ram,
                 serial.clone(),
+                Arc::new(Mutex::new(CmosRtc::default())),
                 ioapic,
                 Arc::new(PciBus::new()),
                 events.clone(),

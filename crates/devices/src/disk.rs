@@ -4,6 +4,7 @@
 //! - [`CowDisk`] — copy-on-write оверлей поверх базового образа: изменения пишутся в отдельный
 //!   файл кластерами по 64 КиБ, базовый образ не меняется (мгновенный сброс инстанса — удалить
 //!   оверлей);
+//! - [`SparseDisk`] — образ Android sparse (`simg`) только для чтения, без распаковки;
 //! - [`CompositeDisk`] — один диск с синтезированной таблицей GPT из нескольких образов
 //!   (system, vendor, super, userdata…) без копирования данных.
 
@@ -666,6 +667,216 @@ impl Disk for CompositeDisk {
     }
 }
 
+/// Сигнатура образа Android sparse (`ED26FF3A`, little-endian).
+pub const SPARSE_MAGIC: u32 = 0xED26_FF3A;
+const SPARSE_HEADER_LEN: usize = 28;
+const SPARSE_CHUNK_HEADER_LEN: usize = 12;
+const CHUNK_RAW: u16 = 0xCAC1;
+const CHUNK_FILL: u16 = 0xCAC2;
+const CHUNK_DONT_CARE: u16 = 0xCAC3;
+const CHUNK_CRC32: u16 = 0xCAC4;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SparseData {
+    /// Данные лежат в файле с этого смещения.
+    Raw(u64),
+    /// Блок заполнен 4-байтовым шаблоном.
+    Fill([u8; 4]),
+    /// Нули.
+    Zero,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct SparseChunk {
+    /// Начало в развёрнутом образе, байты.
+    start: u64,
+    /// Длина, байты.
+    len: u64,
+    data: SparseData,
+}
+
+/// Образ Android sparse (`simg`) только для чтения, без распаковки на диск.
+///
+/// Так поставляются `super.img` и `userdata.img` в архивах Cuttlefish. При открытии строится
+/// индекс чанков; чтение находит чанк двоичным поиском. Запись — через [`CowDisk`] поверх.
+#[derive(Debug)]
+pub struct SparseDisk {
+    file: File,
+    size: u64,
+    chunks: Vec<SparseChunk>,
+}
+
+fn invalid(msg: impl Into<String>) -> io::Error {
+    io::Error::new(io::ErrorKind::InvalidData, msg.into())
+}
+
+fn le16(b: &[u8], at: usize) -> u16 {
+    b.get(at..at + 2)
+        .and_then(|s| s.try_into().ok())
+        .map_or(0, u16::from_le_bytes)
+}
+
+fn le32(b: &[u8], at: usize) -> u32 {
+    b.get(at..at + 4)
+        .and_then(|s| s.try_into().ok())
+        .map_or(0, u32::from_le_bytes)
+}
+
+impl SparseDisk {
+    /// Открывает sparse-образ и строит индекс чанков.
+    ///
+    /// # Errors
+    /// Файл не открывается или повреждён.
+    pub fn open(path: &Path) -> io::Result<Self> {
+        let file = File::open(path)?;
+        let file_len = file.metadata()?.len();
+        let mut header = [0_u8; SPARSE_HEADER_LEN];
+        read_exact_or_zero(&file, &mut header, 0)?;
+        if le32(&header, 0) != SPARSE_MAGIC {
+            return Err(invalid("не sparse-образ"));
+        }
+        if le16(&header, 4) != 1 {
+            return Err(invalid(format!(
+                "неподдерживаемая версия sparse {}",
+                le16(&header, 4)
+            )));
+        }
+        let file_hdr = u64::from(le16(&header, 8));
+        let chunk_hdr = u64::from(le16(&header, 10));
+        let block = u64::from(le32(&header, 12));
+        let total_blocks = u64::from(le32(&header, 16));
+        let total_chunks = le32(&header, 20);
+        if file_hdr < SPARSE_HEADER_LEN as u64
+            || chunk_hdr < SPARSE_CHUNK_HEADER_LEN as u64
+            || block == 0
+            || block % 4 != 0
+        {
+            return Err(invalid("некорректный заголовок sparse"));
+        }
+
+        let mut chunks = Vec::with_capacity(total_chunks.min(1 << 20) as usize);
+        let mut pos = file_hdr;
+        let mut out = 0_u64;
+        for _ in 0..total_chunks {
+            let mut ch = [0_u8; SPARSE_CHUNK_HEADER_LEN];
+            read_exact_or_zero(&file, &mut ch, pos)?;
+            let kind = le16(&ch, 0);
+            let blocks = u64::from(le32(&ch, 4));
+            let total = u64::from(le32(&ch, 8));
+            let body = pos + chunk_hdr;
+            let len = blocks
+                .checked_mul(block)
+                .ok_or_else(|| invalid("переполнение размера чанка"))?;
+            let data = match kind {
+                CHUNK_RAW => {
+                    if total != chunk_hdr + len || body + len > file_len {
+                        return Err(invalid("чанк raw выходит за файл"));
+                    }
+                    Some(SparseData::Raw(body))
+                }
+                CHUNK_FILL => {
+                    let mut pattern = [0_u8; 4];
+                    read_exact_or_zero(&file, &mut pattern, body)?;
+                    Some(if pattern == [0; 4] {
+                        SparseData::Zero
+                    } else {
+                        SparseData::Fill(pattern)
+                    })
+                }
+                CHUNK_DONT_CARE => Some(SparseData::Zero),
+                CHUNK_CRC32 => None,
+                other => return Err(invalid(format!("неизвестный тип чанка 0x{other:04X}"))),
+            };
+            if let Some(data) = data
+                && len > 0
+            {
+                chunks.push(SparseChunk {
+                    start: out,
+                    len,
+                    data,
+                });
+                out += len;
+            }
+            if total < chunk_hdr {
+                return Err(invalid("некорректный размер чанка"));
+            }
+            pos += total;
+        }
+        let size = total_blocks
+            .checked_mul(block)
+            .ok_or_else(|| invalid("переполнение размера образа"))?;
+        if out != size {
+            return Err(invalid(format!(
+                "чанки покрывают {out} байт, а в заголовке {size}"
+            )));
+        }
+        Ok(Self { file, size, chunks })
+    }
+
+    /// Является ли файл sparse-образом.
+    ///
+    /// # Errors
+    /// Файл не открывается.
+    pub fn is_sparse(path: &Path) -> io::Result<bool> {
+        let file = File::open(path)?;
+        let mut magic = [0_u8; 4];
+        read_exact_or_zero(&file, &mut magic, 0)?;
+        Ok(u32::from_le_bytes(magic) == SPARSE_MAGIC)
+    }
+}
+
+impl Disk for SparseDisk {
+    fn size(&self) -> u64 {
+        self.size
+    }
+    fn read_only(&self) -> bool {
+        true
+    }
+    fn read_at(&self, mut buf: &mut [u8], mut offset: u64) -> io::Result<()> {
+        let mut idx = self.chunks.partition_point(|c| c.start + c.len <= offset);
+        while !buf.is_empty() {
+            let Some(c) = self.chunks.get(idx) else {
+                buf.fill(0);
+                return Ok(());
+            };
+            let within = offset.saturating_sub(c.start);
+            let n = usize::try_from((c.len - within).min(buf.len() as u64)).unwrap_or(buf.len());
+            let (head, tail) = buf.split_at_mut(n);
+            match c.data {
+                SparseData::Raw(at) => read_exact_or_zero(&self.file, head, at + within)?,
+                SparseData::Zero => head.fill(0),
+                SparseData::Fill(p) => {
+                    for (i, b) in head.iter_mut().enumerate() {
+                        *b = p[(within as usize + i) % 4];
+                    }
+                }
+            }
+            buf = tail;
+            offset += n as u64;
+            idx += 1;
+        }
+        Ok(())
+    }
+    fn write_at(&self, _buf: &[u8], _offset: u64) -> io::Result<()> {
+        Err(read_only_error())
+    }
+    fn flush(&self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+/// Открывает образ только для чтения: sparse — как [`SparseDisk`], иначе как [`RawDisk`].
+///
+/// # Errors
+/// Файл не открывается или sparse-образ повреждён.
+pub fn open_image(path: &Path) -> io::Result<Box<dyn Disk>> {
+    if SparseDisk::is_sparse(path)? {
+        Ok(Box::new(SparseDisk::open(path)?))
+    } else {
+        Ok(Box::new(RawDisk::open(path, true)?))
+    }
+}
+
 /// Диск в памяти (для тестов).
 #[cfg(test)]
 pub(crate) struct MemDisk(pub Mutex<Vec<u8>>, pub bool);
@@ -707,6 +918,88 @@ mod tests {
 
     fn tmp(name: &str) -> std::path::PathBuf {
         std::env::temp_dir().join(format!("rd-disk-{}-{name}", std::process::id()))
+    }
+
+    /// Собирает sparse-образ: блок 4096, чанки raw, fill, don't care и crc.
+    fn sparse_image() -> (Vec<u8>, Vec<u8>) {
+        const B: usize = 4096;
+        let mut f = Vec::new();
+        let hdr = |f: &mut Vec<u8>, blocks: u32, chunks: u32| {
+            f.extend_from_slice(&SPARSE_MAGIC.to_le_bytes());
+            f.extend_from_slice(&1_u16.to_le_bytes());
+            f.extend_from_slice(&0_u16.to_le_bytes());
+            f.extend_from_slice(&28_u16.to_le_bytes());
+            f.extend_from_slice(&12_u16.to_le_bytes());
+            f.extend_from_slice(&(B as u32).to_le_bytes());
+            f.extend_from_slice(&blocks.to_le_bytes());
+            f.extend_from_slice(&chunks.to_le_bytes());
+            f.extend_from_slice(&0_u32.to_le_bytes());
+        };
+        let chunk = |f: &mut Vec<u8>, kind: u16, blocks: u32, body: &[u8]| {
+            f.extend_from_slice(&kind.to_le_bytes());
+            f.extend_from_slice(&0_u16.to_le_bytes());
+            f.extend_from_slice(&blocks.to_le_bytes());
+            f.extend_from_slice(&(12 + body.len() as u32).to_le_bytes());
+            f.extend_from_slice(body);
+        };
+        hdr(&mut f, 6, 5);
+        let raw: Vec<u8> = (0..2 * B).map(|i| (i % 251) as u8).collect();
+        chunk(&mut f, CHUNK_RAW, 2, &raw);
+        chunk(&mut f, CHUNK_FILL, 1, &[1, 2, 3, 4]);
+        chunk(&mut f, CHUNK_DONT_CARE, 2, &[]);
+        chunk(&mut f, CHUNK_CRC32, 0, &[0; 4]);
+        chunk(&mut f, CHUNK_RAW, 1, &vec![0xAB; B]);
+
+        let mut expect = raw;
+        expect.extend((0..B).map(|i| [1, 2, 3, 4][i % 4]));
+        expect.extend(std::iter::repeat_n(0, 2 * B));
+        expect.extend(std::iter::repeat_n(0xAB, B));
+        (f, expect)
+    }
+
+    #[test]
+    fn sparse_image_reads_like_unsparsed() {
+        let (file, expect) = sparse_image();
+        let path = tmp("sparse.img");
+        std::fs::write(&path, &file).unwrap();
+        assert!(SparseDisk::is_sparse(&path).unwrap());
+        let d = open_image(&path).unwrap();
+        assert_eq!(d.size(), expect.len() as u64);
+        assert!(d.read_only());
+
+        let mut all = vec![0_u8; expect.len()];
+        d.read_at(&mut all, 0).unwrap();
+        assert_eq!(all, expect);
+        // Чтение через границы чанков и с невыровненным смещением.
+        for (off, len) in [(8190, 10), (8193, 4096), (12286, 9000), (24570, 20)] {
+            let mut b = vec![0xEE_u8; len];
+            d.read_at(&mut b, off as u64).unwrap();
+            let want: Vec<u8> = (off..off + len)
+                .map(|i| expect.get(i).copied().unwrap_or(0))
+                .collect();
+            assert_eq!(b, want, "off={off} len={len}");
+        }
+        assert!(d.write_at(&[1], 0).is_err());
+        std::fs::remove_file(&path).unwrap();
+    }
+
+    #[test]
+    fn sparse_rejects_truncated_image() {
+        let (mut file, _) = sparse_image();
+        file.truncate(1000);
+        let path = tmp("sparse-bad.img");
+        std::fs::write(&path, &file).unwrap();
+        assert!(SparseDisk::open(&path).is_err());
+        std::fs::remove_file(&path).unwrap();
+    }
+
+    #[test]
+    fn open_image_falls_back_to_raw() {
+        let path = tmp("raw-plain.img");
+        std::fs::write(&path, [7_u8; 1024]).unwrap();
+        let d = open_image(&path).unwrap();
+        assert_eq!(d.size(), 1024);
+        std::fs::remove_file(&path).unwrap();
     }
 
     fn mem(data: Vec<u8>, ro: bool) -> Box<dyn Disk> {

@@ -207,6 +207,13 @@ pub(crate) fn fetch_cuttlefish(args: &[String]) -> Result<()> {
         format!("https://ci.android.com/builds/submitted/{build}/{target}/latest/raw/{zip_name}");
     let zip = dir.join(&zip_name);
     fetch_verified(&url, &zip, sha.as_deref())?;
+    let unpacked = ["boot.img", "vendor_boot.img", "super.img"]
+        .iter()
+        .all(|n| dir.join(n).is_file());
+    if unpacked {
+        println!("образы уже распакованы: {}", dir.display());
+        return Ok(());
+    }
     // tar из Windows 10/11 (bsdtar) распаковывает zip.
     let status = Command::new("tar")
         .arg("-xf")

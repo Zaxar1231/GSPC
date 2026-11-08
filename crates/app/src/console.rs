@@ -8,7 +8,8 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use rustdroid_devices::{
-    CompositeDisk, ConsoleInput, CowDisk, Disk, Partition, RawDisk, Serial16550, ZeroDisk,
+    CompositeDisk, ConsoleInput, CowDisk, Disk, Partition, RawDisk, Serial16550, SparseDisk,
+    ZeroDisk, open_image,
 };
 use rustdroid_instance::DataDirs;
 use rustdroid_instance::android::{
@@ -245,13 +246,18 @@ fn run_vm(cfg: &VmConfig, mut devices: VmDevices, vm: &VmArgs) -> Result<()> {
 
 fn open_disk(spec: &DiskSpec) -> Result<Arc<dyn Disk>> {
     let read_only = spec.read_only || spec.overlay.is_some();
-    let raw = RawDisk::open(&spec.path, read_only)
-        .with_context(|| format!("не удалось открыть {}", spec.path.display()))?;
+    let open_err = || format!("не удалось открыть {}", spec.path.display());
+    // Sparse-образ читается только через индекс; писать в него можно через `cow=`.
+    let base: Box<dyn Disk> = if SparseDisk::is_sparse(&spec.path).with_context(open_err)? {
+        Box::new(SparseDisk::open(&spec.path).with_context(open_err)?)
+    } else {
+        Box::new(RawDisk::open(&spec.path, read_only).with_context(open_err)?)
+    };
     Ok(match &spec.overlay {
-        Some(o) => Arc::new(
-            CowDisk::open(Box::new(raw), o).with_context(|| format!("оверлей {}", o.display()))?,
-        ),
-        None => Arc::new(raw),
+        Some(o) => {
+            Arc::new(CowDisk::open(base, o).with_context(|| format!("оверлей {}", o.display()))?)
+        }
+        None => Arc::from(base),
     })
 }
 
@@ -321,10 +327,9 @@ pub(crate) fn boot_android(args: &AndroidArgs) -> Result<()> {
     let mut parts = Vec::new();
     for p in partition_plan(dir)? {
         let base: Box<dyn Disk> = match &p.image {
-            Some(img) => Box::new(
-                RawDisk::open(img, true)
-                    .with_context(|| format!("не удалось открыть {}", img.display()))?,
-            ),
+            Some(img) => {
+                open_image(img).with_context(|| format!("не удалось открыть {}", img.display()))?
+            }
             None => Box::new(ZeroDisk(p.empty_size)),
         };
         let cow = CowDisk::open(base, &overlays.join(format!("{}.rdcow", p.name)))

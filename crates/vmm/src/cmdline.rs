@@ -24,6 +24,9 @@ pub fn build(timing: &Timing, extra: &str) -> String {
     let mut parts = vec![
         "console=ttyS0,115200".to_owned(),
         "earlycon=uart8250,io,0x3f8,115200".to_owned(),
+        // В GKI CONFIG_SERIAL_8250_RUNTIME_UARTS=0: без этого ttyS0 не регистрируется,
+        // /dev/console указывает на ttynull и вывод программ гостя теряется.
+        "8250.nr_uarts=1".to_owned(),
         format!("tsc_early_khz={}", timing.tsc_hz / 1000),
         "tsc=reliable".to_owned(),
         format!("lpj={}", timing.tsc_hz / hz),
@@ -56,6 +59,7 @@ mod tests {
         };
         let c = build(&t, "  loglevel=7 ");
         assert!(c.contains("tsc_early_khz=3000000"));
+        assert!(c.contains("8250.nr_uarts=1"));
         assert!(c.contains("lpj=12000000"));
         assert!(c.contains("lapic_timer_period=4000000"));
         assert!(c.ends_with(" loglevel=7"));

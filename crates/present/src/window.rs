@@ -7,6 +7,7 @@
 use std::cell::RefCell;
 
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, RECT, WPARAM};
+use windows::Win32::Graphics::Gdi::{BLACK_BRUSH, GetStockObject, HBRUSH};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::HiDpi::{
     DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, SetProcessDpiAwarenessContext,
@@ -223,6 +224,9 @@ pub fn create(
         hInstance: instance.into(),
         // SAFETY: системный курсор.
         hCursor: unsafe { LoadCursorW(None, IDC_ARROW) }?,
+        // Чёрный фон до первого кадра гостя (иначе окно белое, пока Android загружается).
+        // SAFETY: стоковая кисть системы, освобождать не нужно.
+        hbrBackground: HBRUSH(unsafe { GetStockObject(BLACK_BRUSH) }.0),
         lpszClassName: class,
         ..Default::default()
     };

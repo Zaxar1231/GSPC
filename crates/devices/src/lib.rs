@@ -3,6 +3,7 @@
 //! | Устройство     | Назначение                                              | Этап |
 //! |----------------|---------------------------------------------------------|------|
 //! | 16550 UART     | консоль ядра и шелл ([`serial`])                        | 1    |
+//! | CMOS RTC       | время гостя при загрузке ([`rtc`])                       | 2    |
 //! | virtio-blk     | диски ([`blk`]) поверх бэкендов [`disk`]: raw, CoW, GPT  | 2    |
 //! | virtio-console | консоль Android ([`console`])                           | 2    |
 //! | virtio-input   | мультитач (протокол B) и клавиатура ([`input`])          | 3    |
@@ -16,10 +17,14 @@ pub mod blk;
 pub mod console;
 pub mod disk;
 pub mod input;
+pub mod rtc;
 pub mod serial;
 
 pub use blk::VirtioBlk;
 pub use console::{ConsoleInput, VirtioConsole};
-pub use disk::{CompositeDisk, CowDisk, Disk, Partition, RawDisk, ZeroDisk};
+pub use disk::{
+    CompositeDisk, CowDisk, Disk, Partition, RawDisk, SparseDisk, ZeroDisk, open_image,
+};
 pub use input::{InputEvent, InputEvents, InputKind, TouchState, VirtioInput};
+pub use rtc::CmosRtc;
 pub use serial::{InterruptLine, Serial16550};

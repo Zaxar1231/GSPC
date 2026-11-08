@@ -75,6 +75,9 @@ cargo build --release
        --images guest\cache\cf-<НОМЕР> --memory 4096 --cpus 2 --serial-log android.log -v
    ```
 
+`super.img` и `userdata.img` в архиве Cuttlefish — в формате Android sparse. Они читаются как есть
+(`SparseDisk`, индекс чанков), распаковывать их не нужно.
+
 `userdata.img` из архива Cuttlefish — заготовка на несколько МиБ (её расширяет `launch_cvd`), поэтому
 вместо неё подаётся пустой раздел 8 ГиБ: Android форматирует его при первой загрузке. В bootconfig
 по умолчанию добавляются `androidboot.fstab_suffix=cf.f2fs.hctr2` (иначе первый этап init не
