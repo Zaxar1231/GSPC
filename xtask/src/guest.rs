@@ -116,6 +116,65 @@ pub(crate) fn fetch_kernel(args: &[String]) -> Result<()> {
     Ok(())
 }
 
+/// Таргет Cuttlefish x86_64 по умолчанию (имя таргета зависит от ветки ci.android.com).
+const CF_TARGET: &str = "aosp_cf_x86_64_phone-trunk_staging-userdebug";
+
+/// `cargo xtask cf-fetch --build <ID> [--target <TARGET>] [--sha256 <hex>]`: образы Cuttlefish
+/// (`*-img-<ID>.zip`) в `guest/cache/cf-<ID>/`.
+pub(crate) fn fetch_cuttlefish(args: &[String]) -> Result<()> {
+    let mut build = None;
+    let mut target = CF_TARGET.to_owned();
+    let mut sha = None;
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        match a.as_str() {
+            "--build" => build = it.next().cloned(),
+            "--target" => target = it.next().cloned().context("--target требует значение")?,
+            "--sha256" => sha = it.next().cloned(),
+            other => bail!("неизвестный аргумент: {other}"),
+        }
+    }
+    let Some(build) =
+        build.filter(|b| !b.is_empty() && b.chars().all(|c| c.is_ascii_alphanumeric()))
+    else {
+        bail!(
+            "укажите --build <ID>: номер сборки таргета {target} на https://ci.android.com (см. docs/stage-2.md)"
+        );
+    };
+    if !target
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+    {
+        bail!("некорректное имя таргета: {target}");
+    }
+    let product = target.split('-').next().unwrap_or("aosp_cf_x86_64_phone");
+    let dir = cache_dir().join(format!("cf-{build}"));
+    fs::create_dir_all(&dir)?;
+    let zip_name = format!("{product}-img-{build}.zip");
+    let url =
+        format!("https://ci.android.com/builds/submitted/{build}/{target}/latest/raw/{zip_name}");
+    let zip = dir.join(&zip_name);
+    fetch_verified(&url, &zip, sha.as_deref())?;
+    // tar из Windows 10/11 (bsdtar) распаковывает zip.
+    let status = Command::new("tar")
+        .arg("-xf")
+        .arg(&zip)
+        .arg("-C")
+        .arg(&dir)
+        .status()
+        .context("не удалось запустить tar")?;
+    if !status.success() {
+        bail!("распаковка {} не удалась: {status}", zip.display());
+    }
+    for needed in ["boot.img", "vendor_boot.img", "super.img"] {
+        if !dir.join(needed).is_file() {
+            bail!("в архиве нет {needed} — проверьте таргет сборки");
+        }
+    }
+    println!("образы Android: {}", dir.display());
+    Ok(())
+}
+
 /// Собирает initramfs с busybox в `out`.
 pub(crate) fn build_initramfs(busybox: &[u8], out: &Path) -> Result<()> {
     let file = fs::File::create(out).with_context(|| format!("создание {}", out.display()))?;
