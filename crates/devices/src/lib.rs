@@ -2,7 +2,7 @@
 //!
 //! | Устройство     | Назначение                                              | Этап |
 //! |----------------|---------------------------------------------------------|------|
-//! | 16550 UART     | ранняя консоль ядра                                     | 1    |
+//! | 16550 UART     | консоль ядра и шелл ([`serial`])                        | 1    |
 //! | virtio-blk     | system/vendor/userdata, copy-on-write оверлеи           | 2    |
 //! | virtio-console | логи ядра и `logcat`                                    | 2    |
 //! | virtio-input   | клавиатура и мультитач (ABS_MT_*)                       | 3    |
@@ -11,3 +11,7 @@
 //! | virtio-snd     | звук через WASAPI                                       | 9    |
 //!
 //! virtio-gpu вынесен в отдельный крейт `rustdroid-gpu`.
+
+pub mod serial;
+
+pub use serial::{InterruptLine, Serial16550};
