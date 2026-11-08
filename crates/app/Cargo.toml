@@ -21,6 +21,7 @@ tracing-subscriber.workspace = true
 
 [target.'cfg(windows)'.dependencies]
 rustdroid-devices.workspace = true
+rustdroid-instance.workspace = true
 rustdroid-vmm.workspace = true
 rustdroid-whpx.workspace = true
 windows = { workspace = true, features = [

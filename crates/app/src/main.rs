@@ -1,11 +1,12 @@
 //! RustDroid — точка входа приложения.
 //!
-//! Этап 1: консольные команды
+//! Консольные команды (этапы 1–2):
 //! - `rustdroid check` — проверка, что машина готова запускать ВМ;
-//! - `rustdroid boot --kernel bzImage [--initrd initramfs]` — загрузка ядра Linux, консоль гостя
-//!   (COM1) выводится в терминал, ввод с клавиатуры уходит в гостя. Выход: `Ctrl+A`, затем `X`.
+//! - `rustdroid boot --kernel bzImage [--initrd …] [--disk …] [--cpus N]` — загрузка ядра Linux;
+//! - `rustdroid boot-android --images <каталог Cuttlefish>` — загрузка Android до шелла.
 //!
-//! Окно, UI (Material Design 3) и запуск Android появятся на этапах 2–3.
+//! Консоль гостя выводится в терминал, ввод с клавиатуры уходит в гостя. Выход: `Ctrl+A`, `X`.
+//! Окно и UI (Material Design 3) появятся на этапе 3.
 
 mod cli;
 #[cfg(windows)]
@@ -47,6 +48,7 @@ fn run(command: Command) -> Result<()> {
     match command {
         Command::Check => preflight::run(),
         Command::Boot(args) => console::boot(&args),
+        Command::BootAndroid(args) => console::boot_android(&args),
     }
 }
 
