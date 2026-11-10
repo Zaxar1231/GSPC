@@ -64,6 +64,7 @@ pub(crate) struct VmArgs {
     pub serial_log: Option<PathBuf>,
 
     /// Подключить virtio-console и направить в неё ввод (`hvc`) или оставить COM1 (`serial`).
+    /// Для `boot-android` не действует: консоль Android всегда `hvc0`.
     #[arg(long, value_enum, default_value_t = ConsoleKind::Serial)]
     pub console: ConsoleKind,
 

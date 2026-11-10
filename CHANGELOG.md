@@ -58,7 +58,7 @@
 
 - Образы Android по умолчанию: `aosp-android-latest-release` / `aosp_cf_x86_64_only_phone-userdebug`
   (публичных сборок Cuttlefish x86_64 с Android 15 больше нет).
-- Слишком маленький `userdata.img` (заготовка Cuttlefish) заменяется пустым разделом 8 ГиБ;
+- `userdata.img` из архива Cuttlefish (sparse-образ пустой ФС) заменяется пустым разделом 8 ГиБ;
   в bootconfig по умолчанию `androidboot.fstab_suffix=cf.f2fs.hctr2`,
   `androidboot.vbmeta.device_state=unlocked`, `androidboot.setupwizard_mode=DISABLED`.
 - PowerShell-скрипты сохраняются в UTF-8 с BOM (иначе Windows PowerShell 5.1 ломает кириллицу).

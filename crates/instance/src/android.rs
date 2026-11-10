@@ -241,9 +241,10 @@ const SLOTTED: &[&str] = &[
 ];
 /// Размер пустого раздела `userdata`, если образа нет или он слишком мал.
 pub const USERDATA_SIZE: u64 = 8 << 30;
-/// Образ `userdata` меньше этого размера считается заготовкой: в архивах Cuttlefish он занимает
-/// несколько МиБ, и его расширяет `launch_cvd`. Вместо него даётся пустой раздел
-/// [`USERDATA_SIZE`], который Android форматирует сам (флаг `formattable` в fstab).
+/// Образ `userdata` с файлом меньше этого размера не используется: в архивах Cuttlefish это
+/// sparse-образ пустой файловой системы (файл — пара МиБ). Вместо него даётся пустой раздел
+/// [`USERDATA_SIZE`], который Android форматирует сам (флаг `formattable` в fstab); так размер
+/// данных не зависит от образа. Свой полноразмерный `userdata.img` используется как есть.
 const USERDATA_MIN_IMAGE: u64 = 256 << 20;
 
 /// План разделов по каталогу образов: слотовые разделы `_a`, `super`, `userdata`, `custom`, плюс
@@ -519,7 +520,7 @@ mod tests {
         }
         let plan = partition_plan(&dir).unwrap();
         let names: Vec<_> = plan.iter().map(|p| p.name.as_str()).collect();
-        // Крошечный userdata.img (заготовка Cuttlefish) заменяется пустым разделом.
+        // Маленький файл userdata.img (sparse-образ Cuttlefish) заменяется пустым разделом.
         let userdata = plan.iter().find(|p| p.name == "userdata").unwrap();
         assert_eq!(userdata.image, None);
         assert_eq!(userdata.empty_size, USERDATA_SIZE);
