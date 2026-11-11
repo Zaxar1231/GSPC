@@ -18,7 +18,8 @@
   - мультитач-экран (протокол B, `INPUT_PROP_DIRECT`, 10 касаний) и клавиатура;
   - событие уходит гостю сразу, без ожидания кадра.
 - **D3D12-композитор** (`rustdroid-present`):
-  - самый производительный адаптер;
+  - самый производительный адаптер с D3D12; без D3D12 (старые видеокарты, драйверы WDDM 1.x) —
+    WARP, программный D3D12 из Windows;
   - flip model, waitable swapchain, `SetMaximumFrameLatency(1)`;
   - tearing без VSync (VRR в окне), лимит FPS;
   - копия кадра через persistently-mapped upload-буфер, шейдеров нет: масштабирует DXGI.

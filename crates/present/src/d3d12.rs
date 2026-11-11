@@ -4,7 +4,8 @@
 //! - без VSync — `DXGI_PRESENT_ALLOW_TEARING` (нужно для VRR/G-Sync/FreeSync в окне);
 //! - копия кадра в back buffer через `CopyTextureRegion` из persistently-mapped upload-буфера
 //!   (по одному на кадр в полёте), шейдеров нет: масштабирует DXGI (`DXGI_SCALING_STRETCH`);
-//! - адаптер — самый производительный (`DXGI_GPU_PREFERENCE_HIGH_PERFORMANCE`).
+//! - адаптер — самый производительный с D3D12 (`DXGI_GPU_PREFERENCE_HIGH_PERFORMANCE`); если
+//!   D3D12 нет ни у одного — WARP (программный D3D12 из Windows).
 //!
 //! На этапе 4 кадр будет приходить как общая D3D12-текстура от gfxstream (без копий через CPU).
 
@@ -163,6 +164,58 @@ unsafe fn borrow(resource: &ID3D12Resource) -> ManuallyDrop<Option<ID3D12Resourc
     unsafe { std::mem::transmute_copy(resource) }
 }
 
+fn adapter_name(adapter: &IDXGIAdapter1) -> String {
+    // SAFETY: адаптер валиден, описание пишется в локальную структуру.
+    unsafe { adapter.GetDesc1() }
+        .map(|d| {
+            String::from_utf16_lossy(&d.Description)
+                .trim_end_matches('\0')
+                .to_owned()
+        })
+        .unwrap_or_default()
+}
+
+fn try_device(adapter: &IDXGIAdapter1) -> Option<ID3D12Device> {
+    let mut device: Option<ID3D12Device> = None;
+    // SAFETY: адаптер валиден, выходной указатель локальный.
+    unsafe { D3D12CreateDevice(adapter, D3D_FEATURE_LEVEL_11_0, &raw mut device) }.ok()?;
+    device
+}
+
+/// Устройство D3D12: адаптеры по убыванию производительности, первый с D3D12. Если D3D12 нет
+/// ни у одного (старые видеокарты с драйверами WDDM 1.x, например Intel HD Graphics до 2016
+/// года), — WARP, программный D3D12 из Windows: композитору нужны только копия кадра и
+/// Present, это WARP тянет и на слабом CPU.
+fn create_device(factory: &IDXGIFactory6) -> Result<(ID3D12Device, String)> {
+    for i in 0.. {
+        // SAFETY: перебор адаптеров; ошибка — адаптеры кончились.
+        let Ok(adapter) = (unsafe {
+            factory.EnumAdapterByGpuPreference::<IDXGIAdapter1>(
+                i,
+                DXGI_GPU_PREFERENCE_HIGH_PERFORMANCE,
+            )
+        }) else {
+            break;
+        };
+        let name = adapter_name(&adapter);
+        match try_device(&adapter) {
+            Some(d) => return Ok((d, name)),
+            None => tracing::warn!(adapter = %name, "адаптер без D3D12, пробую следующий"),
+        }
+    }
+    tracing::warn!(
+        "ни одна видеокарта не поддерживает D3D12 — вывод через WARP (программный D3D12). \
+         Обновите драйвер видеокарты, если он есть для Windows 10/11"
+    );
+    // SAFETY: WARP-адаптер есть в любой Windows 10/11.
+    let warp: IDXGIAdapter1 = unsafe { factory.EnumWarpAdapter() }.ctx("EnumWarpAdapter")?;
+    let device = try_device(&warp).ok_or(PresentError::Api {
+        what: "D3D12CreateDevice (WARP)",
+        cause: windows::core::Error::empty(),
+    })?;
+    Ok((device, format!("{} (WARP)", adapter_name(&warp))))
+}
+
 impl Presenter {
     /// Создаёт устройство, очередь и swapchain для окна.
     ///
@@ -172,26 +225,7 @@ impl Presenter {
         // SAFETY: создание фабрики без флагов.
         let factory: IDXGIFactory6 = unsafe { CreateDXGIFactory2(DXGI_CREATE_FACTORY_FLAGS(0)) }
             .ctx("CreateDXGIFactory2")?;
-        // SAFETY: индекс 0 — самый производительный адаптер.
-        let adapter: IDXGIAdapter1 =
-            unsafe { factory.EnumAdapterByGpuPreference(0, DXGI_GPU_PREFERENCE_HIGH_PERFORMANCE) }
-                .ctx("EnumAdapterByGpuPreference")?;
-        // SAFETY: адаптер валиден, описание пишется в локальную структуру.
-        let adapter_name = unsafe { adapter.GetDesc1() }
-            .map(|d| {
-                String::from_utf16_lossy(&d.Description)
-                    .trim_end_matches('\0')
-                    .to_owned()
-            })
-            .unwrap_or_default();
-        let mut device: Option<ID3D12Device> = None;
-        // SAFETY: выходной указатель локальный.
-        unsafe { D3D12CreateDevice(&adapter, D3D_FEATURE_LEVEL_11_0, &raw mut device) }
-            .ctx("D3D12CreateDevice")?;
-        let device = device.ok_or(PresentError::Api {
-            what: "D3D12CreateDevice",
-            cause: windows::core::Error::empty(),
-        })?;
+        let (device, adapter_name) = create_device(&factory)?;
 
         let desc = D3D12_COMMAND_QUEUE_DESC {
             Type: D3D12_COMMAND_LIST_TYPE_DIRECT,

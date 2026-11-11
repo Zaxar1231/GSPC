@@ -47,11 +47,13 @@ keymapping уровня BlueStacks. Производительность — п�
 | ОС | Windows 11 x64 (21H2+) | Windows 11 24H2+ |
 | CPU | 4 ядра, VT-x или AMD-V (SVM) | 8+ ядер (на гибридных Intel учитываются P-ядра) |
 | ОЗУ | 8 ГБ | 16 ГБ+ |
-| GPU | Vulkan 1.3 и D3D12 | Дискретная NVIDIA/AMD или Intel Arc со свежим драйвером |
+| GPU | любая (без DirectX 12 и Vulkan — программный режим, медленнее) | Vulkan 1.3 и D3D12: дискретная NVIDIA/AMD или Intel Arc со свежим драйвером |
 | Диск | 10 ГБ свободно, SSD | NVMe SSD |
 | Компоненты Windows | Windows Hypervisor Platform | — |
 
-Windows 10 не поддерживается.
+Windows 10 не поддерживается. На старых видеокартах без Vulkan и DirectX 12 эмулятор работает в
+упрощённом режиме ([ADR 0009](docs/adr/0009-weak-gpu-support.md)): 2D и лёгкие игры — да, тяжёлые
+3D-игры с высоким FPS — нет.
 
 ## Установка
 

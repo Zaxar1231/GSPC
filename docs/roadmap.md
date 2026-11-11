@@ -12,7 +12,7 @@
 | 1 | Минимальный VMM на WHPX ([инструкция](stage-1.md)) | 2–4 недели | ядро GKI 6.6 + initramfs грузятся, шелл в serial-консоли; проверки WHPX/VT-x с понятными сообщениями |
 | 2 | virtio-pci/MSI-X, virtio-blk, virtio-console ([инструкция](stage-2.md)) | 4–8 недель | образы Cuttlefish x86_64 грузятся до шелла Android; CoW-оверлей для userdata |
 | 3 | virtio-gpu 2D, D3D12-композитор, virtio-input, оверлей ([инструкция](stage-3.md)) | 4–6 недель | экран Android в окне, управление мышью, оверлей FPS / 1% low / время кадра |
-| 4 | 3D: gfxstream + ANGLE-on-Vulkan | 2–4 месяца | 3D-игры на хост-GPU, zero-copy, кэши шейдеров, VSync от хоста, VRR |
+| 4 | 3D: gfxstream + ANGLE-on-Vulkan, запасной путь ANGLE-on-D3D11 ([ADR 0009](adr/0009-weak-gpu-support.md)) | 2–4 месяца | 3D-игры на хост-GPU, zero-copy, кэши шейдеров, VSync от хоста, VRR; на GPU без Vulkan — через D3D11 |
 | 5 | virtio-net (NAT), virtio-vsock, guest-agent | 4–6 недель | интернет в госте без прав администратора, установка APK без ADB, активное приложение |
 | 6 | Keymapping, профили, редактор | 4–6 недель | все типы контролов, редактор поверх игры, автопереключение профилей |
 | 7 | Установщик, автообновление, релизы | 2–4 недели | Velopack, включение WHPX, stable/beta, дельты, подпись, откат |
