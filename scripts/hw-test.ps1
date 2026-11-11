@@ -220,32 +220,75 @@ if (-not $cs.HypervisorPresent -and -not $cpu.VirtualizationFirmwareEnabled) {
 
 Step 'Инструменты сборки'
 Refresh-Path
-function Ensure-Tool([string]$Cmd, [string]$WingetId, [string]$Title, [string[]]$Extra = @()) {
+# Установка через winget только из источника winget (msstore требует соглашений и региона).
+function Winget-Install([string]$Id, [string[]]$Extra = @()) {
+    if (-not (Has 'winget')) { return $false }
+    $rc = Native 'winget' (@('install', '--id', $Id, '-e', '--source', 'winget',
+            '--accept-source-agreements', '--accept-package-agreements') + $Extra)
+    return ($rc -eq 0)
+}
+
+# Скачивает установщик с официального сайта и запускает его (запасной путь, если winget сломан).
+function Direct-Install([string]$Url, [string]$File, [string[]]$Arguments) {
+    $exe = Join-Path $env:TEMP $File
+    Say "  скачиваю $Url"
+    [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+    Invoke-WebRequest -Uri $Url -OutFile $exe -UseBasicParsing
+    Say "  запускаю $File (может запросить права администратора)"
+    $p = Start-Process -FilePath $exe -ArgumentList $Arguments -Wait -PassThru
+    return $p.ExitCode
+}
+
+function Git-InstallerUrl {
+    $rel = Invoke-RestMethod -Uri 'https://api.github.com/repos/git-for-windows/git/releases/latest' -UseBasicParsing
+    $asset = $rel.assets | Where-Object { $_.name -match '^Git-.*-64-bit\.exe$' } | Select-Object -First 1
+    if (-not $asset) { throw 'не найден установщик Git for Windows' }
+    return $asset.browser_download_url
+}
+
+function Ensure-Tool([string]$Cmd, [string]$WingetId, [string]$Title, [scriptblock]$Direct) {
     if (Has $Cmd) { Ok "$Title найден"; return }
-    if (-not (Has 'winget')) { Fail "$Title не найден, а winget недоступен — установите вручную"; throw "нет $Title" }
-    if (-not (Ask "$Title не найден. Установить через winget?")) { throw "нет $Title" }
-    $null = Native 'winget' (@('install', '--id', $WingetId, '-e', '--accept-source-agreements', '--accept-package-agreements') + $Extra)
+    if (-not (Ask "$Title не найден. Установить?")) { throw "нет $Title" }
+    if (-not (Winget-Install $WingetId)) {
+        Warn "winget не смог установить $Title — ставлю установщиком с официального сайта"
+        try { $null = & $Direct } catch { Fail "установка $Title не удалась: $_" }
+    }
     Refresh-Path
-    if (-not (Has $Cmd)) { Fail "$Title не появился в PATH — перезапустите PowerShell и скрипт"; throw "нет $Title" }
+    if (-not (Has $Cmd)) {
+        Fail "$Title не установлен. Поставьте его вручную и запустите скрипт ещё раз"
+        throw "нет $Title"
+    }
     Ok "$Title установлен"
 }
-Ensure-Tool 'git' 'Git.Git' 'Git'
+
+Ensure-Tool 'git' 'Git.Git' 'Git' {
+    Direct-Install (Git-InstallerUrl) 'git-setup.exe' @('/VERYSILENT', '/NORESTART', '/NOCANCEL', '/SP-')
+}
 
 $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
-$vc = $null
-if (Test-Path $vswhere) {
-    $vc = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+function Find-Msvc {
+    if (-not (Test-Path $vswhere)) { return $null }
+    return (& $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath)
 }
+$vc = Find-Msvc
 if ($vc) {
     Ok "MSVC найден: $vc"
 } else {
-    if (-not (Ask 'Нет Visual Studio Build Tools (C++). Установить через winget? (~5 ГБ, 10–30 минут)')) { throw 'нет MSVC' }
-    $null = Native 'winget' @('install', '--id', 'Microsoft.VisualStudio.2022.BuildTools', '-e',
-        '--accept-source-agreements', '--accept-package-agreements',
-        '--override', '--quiet --wait --norestart --add Microsoft.VisualStudio.Workload.VCTools --includeRecommended')
-    Ok 'Visual Studio Build Tools установлены'
+    if (-not (Ask 'Нет Visual Studio Build Tools (C++). Установить? (~5 ГБ, 10–30 минут)')) { throw 'нет MSVC' }
+    $vsArgs = '--quiet --wait --norestart --add Microsoft.VisualStudio.Workload.VCTools --includeRecommended'
+    if (-not (Winget-Install 'Microsoft.VisualStudio.2022.BuildTools' @('--override', $vsArgs))) {
+        Warn 'winget не смог установить Build Tools — ставлю установщиком с сайта Microsoft'
+        try { $null = Direct-Install 'https://aka.ms/vs/17/release/vs_BuildTools.exe' 'vs_BuildTools.exe' $vsArgs }
+        catch { Fail "установка Build Tools не удалась: $_" }
+    }
+    $vc = Find-Msvc
+    if (-not $vc) { Fail 'Visual Studio Build Tools не установлены. Поставьте их вручную и запустите скрипт ещё раз'; throw 'нет MSVC' }
+    Ok "Visual Studio Build Tools установлены: $vc"
 }
-Ensure-Tool 'cargo' 'Rustlang.Rustup' 'Rust (rustup)'
+
+Ensure-Tool 'cargo' 'Rustlang.Rustup' 'Rust (rustup)' {
+    Direct-Install 'https://win.rustup.rs/x86_64' 'rustup-init.exe' @('-y', '--profile', 'minimal')
+}
 
 # ---------------------------------------------------- репозиторий ---
 
