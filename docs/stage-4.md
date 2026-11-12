@@ -65,6 +65,16 @@ D3D11 ([ADR 0009](adr/0009-weak-gpu-support.md)).
 Проверка — 10 unit-тестов протокола на заглушке бэкенда; на реальном gfxstream проверится на
 железе в 4.4.
 
+## Проверки на железе
+
+`hw-test.ps1 -CheckOnly` (Vulkan хоста и запуск gfxstream на Vulkan, без Android):
+
+| Машина | Vulkan | gfxstream | Примечание |
+|---|---|---|---|
+| i3-10110U, Intel UHD, драйвер 27.20.100.8984 | 1.2.154 | ✅ после патча 0002; capsets vulkan (116 Б), gles, composer | до патча: `VK_ERROR_OUT_OF_POOL_MEMORY` в композиторе → `abort` |
+| i5-8300H | — | — | не проверено |
+| i3-3220, Intel HD 2500 | — | — | не проверено (ожидается: нет Vulkan) |
+
 ## Риски
 
 - **Сборка gfxstream под Windows.** Хостовая часть gfxstream собирается для Android Emulator на
