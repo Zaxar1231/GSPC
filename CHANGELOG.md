@@ -24,6 +24,9 @@
 - `boot-android --gpu gfxstream` (задача 4.4): virtio-gpu с 3D на gfxstream и параметры гостя
   как `gfxstream_guest_angle` у Cuttlefish. По умолчанию `--gpu software`. `hw-test.ps1 -Gpu`
   (`auto` — gfxstream, если его прошла проверка 3D).
+- Диагностика 3D: команды virtio-gpu в логе (`-v`), сторож пишет, какая команда не завершается
+  дольше 3 с (поток устройства ждёт gfxstream); `hw-test.ps1` сохраняет код выхода этапа 3 и
+  запись о сбое процесса из журнала Windows (`stage3-crash.txt`).
 - `rustdroid check` проверяет 3D: видеокарты и версию Vulkan (через `vulkan-1.dll`) и запуск
   gfxstream на Vulkan. Проверка идёт в дочернем процессе `rustdroid gpu-probe`, чтобы падение
   драйвера не роняло `check`; отсутствие 3D — предупреждение, а не ошибка. Если проверка

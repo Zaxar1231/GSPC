@@ -592,12 +592,24 @@ if ($Stages -contains 3 -and $images -and (Test-Path $Exe)) {
         $png = Join-Path $Out ('stage3-shot-{0:D2}.png' -f $script:shot)
         try { $null = [RdShot]::Capture($p.MainWindowHandle, $png) } catch { }
     }
+    $stage3Start = Get-Date
     $rc = Run-Vm 'stage3' @('boot-android', '--images', $images, '--instance', 'hwtest',
         '--memory', "$Memory", '--cpus', "$Cpus", '--display', $Display, '--timeout', "$Stage3Seconds",
         '--gpu', $gpuMode, '--serial-log', $serial, '--logcat', (Join-Path $Out 'stage3-logcat.txt'), '-v') $Stage3Seconds $snap
     Say "  код выхода: $rc"
     "stage3 gpu: $gpuMode" | Add-Content -Path (Join-Path $Out 'system.txt') -Encoding UTF8
     Ok "stage3: графика $gpuMode"
+    $hex = '0x{0:X8}' -f ([int64]$rc -band 0xFFFFFFFF)
+    if ($rc -eq 0) { Ok 'stage3: rustdroid завершился нормально' } else { Warn "stage3: код выхода $rc ($hex)" }
+    # Если процесс упал, Windows пишет в журнал «Приложение» модуль и код исключения.
+    try {
+        $crash = @(Get-WinEvent -FilterHashtable @{ LogName = 'Application'; ProviderName = 'Application Error'; StartTime = $stage3Start } -ErrorAction Stop |
+            Where-Object { $_.Message -match 'rustdroid' })
+        if ($crash.Count -gt 0) {
+            $crash | ForEach-Object { $_.Message; '' } | Set-Content (Join-Path $Out 'stage3-crash.txt') -Encoding UTF8
+            Warn "stage3: процесс rustdroid упал — подробности в stage3-crash.txt"
+        }
+    } catch { }
     Report-Android 'stage3' $serial
 
     $frames = Select-String -Path (Join-Path $Out 'stage3-stderr.log'), (Join-Path $Out 'stage3-stdout.log') `

@@ -25,6 +25,7 @@ use crate::backend::{
 };
 use crate::edid::{self, DisplayMode};
 use crate::scanout::{Frame, Mailbox, PixelFormat};
+use crate::watch::CommandWatch;
 
 /// Возможность: 3D-команды (исторически «virgl»; нужна ядру для контекстов и `SUBMIT_3D`).
 const VIRTIO_GPU_F_VIRGL: u64 = 1 << 0;
@@ -175,6 +176,7 @@ struct ThreeD {
     resources: HashMap<u32, Res3d>,
     pending: Vec<PendingFence>,
     shm: Option<Shm>,
+    watch: Arc<CommandWatch>,
 }
 
 impl ThreeD {
@@ -224,6 +226,13 @@ impl ThreeD {
             return Err(RESP_ERR_UNSPEC);
         }
         shm.mapped.insert(id, (offset, len));
+        tracing::debug!(
+            id,
+            offset,
+            len,
+            map_info = m.map_info,
+            "blob отображён в BAR2"
+        );
         Ok(m.map_info)
     }
 }
@@ -351,6 +360,7 @@ impl VirtioGpu {
             resources: HashMap::new(),
             pending: Vec::new(),
             shm: None,
+            watch: CommandWatch::spawn(),
         });
         gpu
     }
@@ -1074,10 +1084,22 @@ impl VirtioDevice for VirtioGpu {
         while queue.pop(mem, &mut self.chain)? {
             let written = if index == CONTROL_QUEUE {
                 self.gather(mem)?;
+                let watch = self.three_d.as_ref().map(|t| Arc::clone(&t.watch));
+                if let Some(w) = &watch {
+                    w.begin(
+                        u32_at(&self.req, 0),
+                        u32_at(&self.req, 16),
+                        u32_at(&self.req, HDR),
+                    );
+                }
                 let status = self.command(mem);
+                if let Some(w) = &watch {
+                    w.end();
+                }
                 if status >= RESP_ERR_UNSPEC {
                     tracing::debug!(
-                        cmd = format_args!("0x{:x}", u32_at(&self.req, 0)),
+                        cmd = crate::watch::command_name(u32_at(&self.req, 0)),
+                        code = format_args!("0x{:x}", u32_at(&self.req, 0)),
                         status = format_args!("0x{status:x}"),
                         "команда virtio-gpu отклонена"
                     );

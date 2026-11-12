@@ -15,6 +15,7 @@ pub mod edid;
 #[cfg(windows)]
 pub mod gfxstream;
 pub mod scanout;
+mod watch;
 
 pub use backend::{Backend3d, FenceSink};
 pub use device::VirtioGpu;
