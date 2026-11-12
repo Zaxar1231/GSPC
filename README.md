@@ -16,10 +16,10 @@ keymapping уровня BlueStacks. Производительность — п�
 </div>
 
 > [!WARNING]
-> Проект на ранней стадии (этап 3: экран и ввод). Можно загрузить ядро Linux
-> ([docs/stage-1.md](docs/stage-1.md)) и Android из образов Cuttlefish
-> ([docs/stage-2.md](docs/stage-2.md)) — в консоли или в окне с экраном, мышью и оверлеем
-> ([docs/stage-3.md](docs/stage-3.md)). 3D на видеокарте хоста — этап 4.
+> Проект на ранней стадии (этап 4: 3D на видеокарте). Android 17 из образов Cuttlefish
+> загружается до рабочего стола в окне, с управлением мышью и оверлеем производительности
+> ([docs/stage-3.md](docs/stage-3.md)); пока рисует процессор, поэтому FPS низкий.
+> Проверить на своём компьютере: [docs/hardware-test.md](docs/hardware-test.md).
 
 ![Скриншот (заглушка)](docs/assets/screenshot-placeholder.svg)
 
@@ -171,10 +171,10 @@ Hyper-V), перестанут запускаться или будут рабо
 | Этап | Содержание | Статус |
 |---|---|---|
 | 0 | Репозиторий, workspace, CI, документация | ✅ |
-| 1 | Минимальный VMM на WHPX: ядро Linux + initramfs, serial-консоль | ✅ (ждёт проверки на железе) |
-| 2 | virtio-pci/MSI-X, virtio-blk, virtio-console: AOSP до шелла | ✅ (ждёт проверки на железе) |
-| 3 | virtio-gpu 2D, D3D12-композитор, virtio-input, оверлей производительности | 🚧 |
-| 4 | 3D: gfxstream + ANGLE-on-Vulkan | ⏳ |
+| 1 | Минимальный VMM на WHPX: ядро Linux + initramfs, serial-консоль | ✅ |
+| 2 | virtio-pci/MSI-X, virtio-blk, virtio-console: AOSP до шелла | ✅ |
+| 3 | virtio-gpu 2D, D3D12-композитор, virtio-input, оверлей производительности | ✅ |
+| 4 | 3D: gfxstream + ANGLE-on-Vulkan, запасной путь через D3D11 | 🚧 |
 | 5 | virtio-net (NAT), virtio-vsock, гостевой агент | ⏳ |
 | 6 | Keymapping, профили, редактор | ⏳ |
 | 7 | Установщик, автообновление, релизный пайплайн | ⏳ |
