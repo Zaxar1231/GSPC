@@ -5,12 +5,19 @@
 //! вывод и код выхода и превращает их в пункты проверки. Если дочерний процесс упал, это тоже
 //! результат: 3D на этой машине недоступно, будет программный рендер.
 //!
-//! Строки результата в stdout дочернего процесса: `OK <текст>`, `WARN <текст>`.
+//! Драйвер или gfxstream могут и зависнуть, поэтому у дочернего процесса есть предел времени
+//! [`PROBE_TIMEOUT`]: по его истечении процесс снимается, а в проверке пишется шаг, на котором
+//! он остановился.
+//!
+//! Строки в stdout дочернего процесса: `STEP <шаг>` (перед каждым шагом), `OK <текст>`,
+//! `WARN <текст>`.
 
 use std::ffi::{CStr, c_char, c_void};
+use std::io::{BufRead as _, BufReader, Write as _};
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use rustdroid_gfxstream::{
     CAPSET_GFXSTREAM_COMPOSER, CAPSET_GFXSTREAM_GLES, CAPSET_GFXSTREAM_VULKAN, Config,
@@ -18,13 +25,15 @@ use rustdroid_gfxstream::{
 };
 use rustdroid_gpu::FenceSink;
 use rustdroid_gpu::gfxstream::GfxstreamBackend;
-use windows::Win32::Foundation::FreeLibrary;
 use windows::Win32::System::LibraryLoader::{
     GetProcAddress, LOAD_LIBRARY_SEARCH_SYSTEM32, LoadLibraryExW,
 };
 use windows::core::{PCSTR, w};
 
 use crate::preflight::Check;
+
+/// Сколько ждать дочерний процесс проверки.
+const PROBE_TIMEOUT: Duration = Duration::from_secs(45);
 
 /// Ссылка на установщик рантайма Visual C++ 2015–2022 (нужен gfxstream).
 const VC_REDIST: &str = "https://aka.ms/vs/17/release/vc_redist.x64.exe";
@@ -47,32 +56,87 @@ pub(crate) fn checks(verbose: u8) -> Vec<Check> {
     if verbose > 0 {
         cmd.arg(format!("-{}", "v".repeat(verbose.into())));
     }
-    // stderr (логи драйвера и gfxstream) наследуется и попадает в лог проверки.
-    let out = match cmd.arg("gpu-probe").output() {
-        Ok(o) => o,
+    // stderr (логи драйвера и gfxstream) наследуется и сразу попадает в лог проверки.
+    let mut child = match cmd
+        .arg("gpu-probe")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit())
+        .spawn()
+    {
+        Ok(c) => c,
         Err(e) => return vec![warn(&format!("проверка 3D не запустилась: {e}"))],
     };
-    let mut v: Vec<Check> = String::from_utf8_lossy(&out.stdout)
-        .lines()
-        .filter_map(|l| {
-            if let Some(m) = l.strip_prefix("OK ") {
-                Some(Check::Ok(m.to_owned()))
-            } else {
-                l.strip_prefix("WARN ").map(warn)
+    // Строки читаются в отдельном потоке: так видно, на каком шаге процесс завис.
+    let (tx, rx) = std::sync::mpsc::channel::<String>();
+    if let Some(stdout) = child.stdout.take() {
+        std::thread::spawn(move || {
+            for line in BufReader::new(stdout).lines().map_while(Result::ok) {
+                if tx.send(line).is_err() {
+                    break;
+                }
             }
-        })
-        .collect();
-    if !out.status.success() {
-        let code = out.status.code().unwrap_or(-1);
-        #[allow(
-            clippy::cast_sign_loss,
-            reason = "коды исключений Windows печатаются как u32"
-        )]
-        v.push(warn(&format!(
-            "проверка 3D завершилась аварийно (код 0x{:08X}): драйвер или gfxstream упали при \
-             запуске. 3D будет выключено, Android рисует программно",
-            code as u32
-        )));
+        });
+    }
+    let deadline = Instant::now() + PROBE_TIMEOUT;
+    let mut v = Vec::new();
+    let mut step = String::from("запуск");
+    let mut status = None;
+    loop {
+        while let Ok(line) = rx.try_recv() {
+            if let Some(s) = line.strip_prefix("STEP ") {
+                tracing::debug!(step = s, "проверка 3D");
+                s.clone_into(&mut step);
+            } else if let Some(m) = line.strip_prefix("OK ") {
+                v.push(Check::Ok(m.to_owned()));
+            } else if let Some(m) = line.strip_prefix("WARN ") {
+                v.push(warn(m));
+            }
+        }
+        if let Some(s) = status {
+            // Процесс вышел: дочитываем остаток вывода и заканчиваем.
+            if rx.recv_timeout(Duration::from_millis(200)).is_err() {
+                return finish(v, s);
+            }
+            continue;
+        }
+        match child.try_wait() {
+            Ok(Some(s)) => status = Some(s),
+            Ok(None) if Instant::now() > deadline => {
+                let _ = child.kill();
+                let _ = child.wait();
+                v.push(warn(&format!(
+                    "проверка 3D зависла на шаге «{step}» и снята через {} с. 3D будет \
+                     выключено, Android рисует программно",
+                    PROBE_TIMEOUT.as_secs()
+                )));
+                return v;
+            }
+            Ok(None) => std::thread::sleep(Duration::from_millis(100)),
+            Err(e) => {
+                v.push(warn(&format!("проверка 3D: {e}")));
+                return v;
+            }
+        }
+    }
+}
+
+fn finish(mut v: Vec<Check>, status: std::process::ExitStatus) -> Vec<Check> {
+    // 0 — gfxstream работает, 1 — обычный неуспех (причины уже в строках WARN).
+    match status.code() {
+        Some(0 | 1) => {}
+        code => {
+            let code = code.unwrap_or(-1);
+            #[allow(
+                clippy::cast_sign_loss,
+                reason = "коды исключений Windows печатаются как u32"
+            )]
+            v.push(warn(&format!(
+                "проверка 3D завершилась аварийно (код 0x{:08X}): драйвер или gfxstream упали. \
+                 3D будет выключено, Android рисует программно",
+                code as u32
+            )));
+        }
     }
     v
 }
@@ -87,21 +151,29 @@ fn warn(problem: &str) -> Check {
 pub(crate) fn run() -> anyhow::Result<()> {
     let vk = vulkan();
     let gfx = gfxstream();
-    if vk && gfx {
-        Ok(())
-    } else {
-        // Обычный неуспех: родитель читает строки WARN, отдельное сообщение не нужно.
-        std::process::exit(1);
-    }
+    // Выход без деструкторов: teardown gfxstream и выгрузка драйвера не нужны и могут зависнуть.
+    // Обычный неуспех (1): причины родитель читает из строк WARN.
+    std::process::exit(if vk && gfx { 0 } else { 1 });
 }
 
 #[allow(clippy::print_stdout, reason = "протокол с родительским процессом")]
+fn line(text: &str) {
+    let mut out = std::io::stdout().lock();
+    let _ = writeln!(out, "{text}");
+    let _ = out.flush();
+}
+
+fn step(name: &str) {
+    line(&format!("STEP {name}"));
+}
+
 fn report(ok: bool, text: &str) {
-    println!("{} {text}", if ok { "OK" } else { "WARN" });
+    line(&format!("{} {text}", if ok { "OK" } else { "WARN" }));
 }
 
 /// Vulkan хоста через системный загрузчик `vulkan-1.dll`.
 fn vulkan() -> bool {
+    step("Vulkan: список видеокарт");
     match vulkan_devices() {
         Ok(devices) if devices.is_empty() => {
             report(
@@ -172,6 +244,7 @@ fn gfxstream() -> bool {
 }
 
 fn probe_gfxstream(path: &Path) -> Result<String, rustdroid_gfxstream::Error> {
+    step("gfxstream: загрузка DLL и инициализация на Vulkan");
     let backend = GfxstreamBackend::new(
         path,
         Config {
@@ -194,6 +267,8 @@ fn probe_gfxstream(path: &Path) -> Result<String, rustdroid_gfxstream::Error> {
             format!("{name} v{} ({} Б)", c.max_version, c.max_size)
         })
         .collect();
+    // Без teardown: процесс сейчас завершится, а остановка потоков gfxstream может зависнуть.
+    std::mem::forget(backend);
     Ok(if names.is_empty() {
         "нет".into()
     } else {
@@ -264,6 +339,7 @@ fn device_type(t: u32) -> &'static str {
 }
 
 fn vulkan_devices() -> Result<Vec<String>, String> {
+    step("Vulkan: загрузка vulkan-1.dll");
     // SAFETY: имя DLL — статическая строка; поиск только в System32 (загрузчик Vulkan
     // ставится туда драйвером).
     let module = unsafe { LoadLibraryExW(w!("vulkan-1.dll"), None, LOAD_LIBRARY_SEARCH_SYSTEM32) }
@@ -275,10 +351,9 @@ fn vulkan_devices() -> Result<Vec<String>, String> {
         .ok_or("в vulkan-1.dll нет vkGetInstanceProcAddr")?;
     // SAFETY: сигнатура vkGetInstanceProcAddr из спецификации Vulkan.
     let gipa: GetInstanceProcAddr = unsafe { std::mem::transmute(gipa) };
-    let result = enumerate(gipa);
-    // SAFETY: модуль загружен выше; экземпляр Vulkan уже уничтожен в `enumerate`.
-    let _ = unsafe { FreeLibrary(module) };
-    result
+    // Модуль не выгружается: процесс проверки скоро завершится, а выгрузка ICD драйвера
+    // бывает медленной.
+    enumerate(gipa)
 }
 
 /// Загружает функцию Vulkan; `F` — её точная сигнатура.
@@ -328,6 +403,7 @@ fn enumerate(gipa: GetInstanceProcAddr) -> Result<Vec<String>, String> {
         enabled_extension_count: 0,
         pp_enabled_extension_names: std::ptr::null(),
     };
+    step("Vulkan: vkCreateInstance");
     let mut instance: Instance = null;
     // SAFETY: структуры валидны на время вызова, выход — локальная переменная.
     let rc = unsafe { create(&raw const info, std::ptr::null(), &raw mut instance) };
@@ -338,6 +414,7 @@ fn enumerate(gipa: GetInstanceProcAddr) -> Result<Vec<String>, String> {
             version_str(loader)
         ));
     }
+    step("Vulkan: свойства видеокарт");
     let devices = list_devices(gipa, instance);
     // SAFETY: как выше.
     if let Some(destroy) = unsafe { vk_fn::<DestroyInstance>(gipa, instance, c"vkDestroyInstance") }
