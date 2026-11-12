@@ -7,7 +7,7 @@ name: gfxstream
 
 on:
   push:
-    paths: [".github/workflows/gfxstream.yml"]
+    paths: [".github/workflows/gfxstream.yml", "third_party/gfxstream-patches/**"]
   workflow_dispatch:
 
 permissions:
@@ -37,6 +37,21 @@ jobs:
           git -C gfxstream fetch --depth 1 origin $env:GFXSTREAM_COMMIT
           git -C gfxstream checkout --quiet FETCH_HEAD
           git -C gfxstream log -1 --format='%H %cd %s'
+
+      - uses: actions/checkout@v4
+        with:
+          path: rustdroid
+          sparse-checkout: third_party/gfxstream-patches
+
+      - name: Патчи RustDroid для gfxstream
+        shell: pwsh
+        run: |
+          # Исправления сборки под Windows, которых пока нет в upstream (см. каждый патч).
+          foreach ($p in Get-ChildItem rustdroid/third_party/gfxstream-patches -Filter *.patch | Sort-Object Name) {
+            "применяю $($p.Name)"
+            git -C gfxstream apply --whitespace=nowarn $p.FullName
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
 
       - name: Конфигурация (CMake, ClangCL)
         shell: pwsh
