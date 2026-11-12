@@ -62,6 +62,11 @@
   `vkCmdSetEvent2`, `vkCmdResetEvent2`, `vkCmdWriteTimestamp2`) на таком драйвере тоже вели бы
   в пустой указатель; патч `0005-sync2-command-shims.patch` подставляет переходники на обычные
   команды Vulkan 1.0.
+- Драйвер Intel UHD 27.20.100.x падал внутри `vkCmdBindVertexBuffers2EXT` (чтение по адресу 0),
+  когда ANGLE в госте включал `VK_EXT_extended_dynamic_state`: гостевой драйвер шлёт команды под
+  core-1.3 именами, а декодер отдаёт их EXT-функциям драйвера. Патч
+  `0006-hide-extended-dynamic-state.patch` скрывает от гостя `VK_EXT_extended_dynamic_state` и
+  `VK_EXT_extended_dynamic_state2`, если драйвер хоста младше Vulkan 1.3; ANGLE работает без них.
 
 - KeyMint падал с SIGILL в `_aesni_ctr32_6x` на CPU с AVX, но без AES-NI (i3-3220): BoringSSL
   видел AVX и выбирал AES-GCM на VEX-инструкциях (`VAESENC`); system_server после этого падал
