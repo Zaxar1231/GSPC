@@ -6,6 +6,7 @@ members = [
     "crates/virtio",
     "crates/devices",
     "crates/gpu",
+    "crates/gfxstream",
     "crates/present",
     "crates/input",
     "crates/hostinput",
@@ -36,6 +37,7 @@ rustdroid-vmm = { path = "crates/vmm" }
 rustdroid-virtio = { path = "crates/virtio" }
 rustdroid-devices = { path = "crates/devices" }
 rustdroid-gpu = { path = "crates/gpu" }
+rustdroid-gfxstream = { path = "crates/gfxstream" }
 rustdroid-present = { path = "crates/present" }
 rustdroid-input = { path = "crates/input" }
 rustdroid-hostinput = { path = "crates/hostinput" }

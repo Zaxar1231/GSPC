@@ -1,0 +1,23 @@
+[package]
+name = "rustdroid-gfxstream"
+description = "Загрузка gfxstream_backend.dll и безопасная обёртка над C API stream_renderer_*"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+publish.workspace = true
+
+[dependencies]
+thiserror.workspace = true
+tracing.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows = { workspace = true, features = [
+    "Win32_Foundation",
+    "Win32_System_LibraryLoader",
+] }
+
+[lints]
+workspace = true

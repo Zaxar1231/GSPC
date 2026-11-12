@@ -23,8 +23,8 @@ D3D11 ([ADR 0009](adr/0009-weak-gpu-support.md)).
 | # | Задача | Проверка | Статус |
 |---|---|---|---|
 | 4.0 | Ускорение программного выполнения `MOVBE`/AES-NI: читать из WHPX только нужные регистры | меньше нагрузка на i3-3220 | 🚧 |
-| 4.1 | Сборка gfxstream (хостовая часть) под Windows в GitHub Actions, публикация DLL | DLL собирается в CI | ⏳ |
-| 4.2 | `rustdroid-gfxstream`: загрузка DLL, безопасная обёртка над C API `stream_renderer_*` | тесты обёртки, `rustdroid check` видит DLL | ⏳ |
+| 4.1 | Сборка gfxstream (хостовая часть) под Windows в GitHub Actions, публикация DLL | DLL собирается в CI | 🚧 |
+| 4.2 | `rustdroid-gfxstream`: загрузка DLL, безопасная обёртка над C API `stream_renderer_*` | тесты обёртки, `rustdroid check` видит DLL | 🚧 |
 | 4.3 | virtio-gpu 3D: `CONTEXT_INIT`, capsets, контексты, `SUBMIT_3D`, blob-ресурсы, общая память (shm BAR), фенсы по контекстам | unit-тесты протокола | ⏳ |
 | 4.4 | Параметры гостя для gfxstream (`gpu_mode=gfxstream` у Cuttlefish), выбор уровня графики | загрузочная анимация через GPU | ⏳ |
 | 4.5 | Zero-copy: Vulkan-образ gfxstream → NT handle → `OpenSharedHandle` в D3D12 | нет копии кадра через CPU | ⏳ |
