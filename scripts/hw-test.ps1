@@ -245,6 +245,21 @@ function Download([string]$Url, [string]$Dest) {
     Invoke-WebRequest -Uri $Url -OutFile $Dest -UseBasicParsing
 }
 
+# Большие файлы: curl.exe из Windows 10/11 с индикатором, повторами и докачкой после обрыва
+# (Invoke-WebRequest молчит до конца и начинает заново при каждом сбое).
+function Download-Large([string]$Url, [string]$Dest) {
+    $curl = Join-Path $env:SystemRoot 'System32\curl.exe'
+    if (-not (Test-Path $curl)) { Download $Url $Dest; return }
+    for ($attempt = 1; $attempt -le 5; $attempt++) {
+        & $curl -L --fail --retry 5 --retry-delay 5 --connect-timeout 30 --speed-limit 10000 --speed-time 60 `
+            -C - --progress-bar -o $Dest $Url
+        if ($LASTEXITCODE -eq 0) { return }
+        Warn "скачивание прервалось (curl, код $LASTEXITCODE), попытка $attempt из 5 — продолжаю с места обрыва"
+        Start-Sleep -Seconds 5
+    }
+    throw "не удалось скачать $Url (curl, код $LASTEXITCODE). Проверьте доступ к ci.android.com и storage.googleapis.com"
+}
+
 if ($FromSource) {
     Step 'Инструменты сборки'
     Refresh-Path
@@ -470,8 +485,8 @@ function Fetch-Images {
     $dir = Join-Path $Work "cf-$id"
     New-Item -ItemType Directory -Force -Path $dir | Out-Null
     $zip = Join-Path $dir "aosp_cf_x86_64_only_phone-img-$id.zip"
-    Say "  скачиваю образы сборки $id (~1,1 ГБ)"
-    Download "https://ci.android.com/builds/submitted/$id/$target/latest/raw/aosp_cf_x86_64_only_phone-img-$id.zip" $zip
+    Say "  скачиваю образы сборки $id (~1,1 ГБ; при обрыве скачивание продолжится с того же места)"
+    Download-Large "https://ci.android.com/builds/submitted/$id/$target/latest/raw/aosp_cf_x86_64_only_phone-img-$id.zip" $zip
     Say '  распаковываю (несколько минут)'
     $tar = Get-Command tar -ErrorAction SilentlyContinue
     if ($tar) { $null = Native $tar.Source @('-xf', $zip, '-C', $dir) }
