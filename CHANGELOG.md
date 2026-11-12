@@ -10,6 +10,11 @@
 
 ### Fixed
 
+- Android падал в `init` (`invalid opcode`) на CPU без `MOVBE` (Intel до Haswell, например
+  Core i3-3220; AMD до Jaguar/Zen): образы Cuttlefish собраны под Silvermont. VMM перехватывает
+  `#UD` и выполняет `MOVBE` сам (декодер `insn`, перевод адресов, `#PF` для неподгруженных
+  страниц), остальные `#UD` возвращает гостю. Счётчики `emulated` и `invalid_opcode` в
+  статистике выходов.
 - `cf-fetch` не распаковывал образы, если `tar` не находится в PATH: теперь пробуется
   `%SystemRoot%\System32\tar.exe`, затем PowerShell `Expand-Archive`.
 

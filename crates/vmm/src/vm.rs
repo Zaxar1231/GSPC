@@ -13,21 +13,23 @@ use rustdroid_devices::{
 use rustdroid_gpu::{DisplayMode, Mailbox, VirtioGpu};
 use rustdroid_virtio::{GuestMemory, MsiMessage, MsiSink, VirtioPci};
 use rustdroid_whpx::sys::{
-    WHV_INTERNAL_ACTIVITY_REGISTER, WHV_X64_SEGMENT_REGISTER, WHV_X64_SEGMENT_REGISTER_0,
-    WHV_X64_TABLE_REGISTER, WHvRegisterInternalActivityState, WHvX64RegisterCr0, WHvX64RegisterCr3,
-    WHvX64RegisterCr4, WHvX64RegisterCs, WHvX64RegisterDs, WHvX64RegisterEfer, WHvX64RegisterEs,
-    WHvX64RegisterFs, WHvX64RegisterGdtr, WHvX64RegisterGs, WHvX64RegisterIdtr, WHvX64RegisterPat,
-    WHvX64RegisterRflags, WHvX64RegisterRip, WHvX64RegisterRsi, WHvX64RegisterSs, WHvX64RegisterTr,
+    WHV_INTERNAL_ACTIVITY_REGISTER, WHV_REGISTER_NAME, WHV_X64_SEGMENT_REGISTER,
+    WHV_X64_SEGMENT_REGISTER_0, WHV_X64_TABLE_REGISTER, WHvRegisterInternalActivityState,
+    WHvX64RegisterCr0, WHvX64RegisterCr3, WHvX64RegisterCr4, WHvX64RegisterCs, WHvX64RegisterDs,
+    WHvX64RegisterEfer, WHvX64RegisterEs, WHvX64RegisterFs, WHvX64RegisterGdtr, WHvX64RegisterGs,
+    WHvX64RegisterIdtr, WHvX64RegisterPat, WHvX64RegisterRflags, WHvX64RegisterRip,
+    WHvX64RegisterRsi, WHvX64RegisterSs, WHvX64RegisterTr,
 };
 use rustdroid_whpx::{
     DestinationMode, Exit, Interrupt, InterruptType, MapFlags, Partition, PartitionConfig,
-    RegisterName, RegisterValue, TriggerMode, Vcpu, caps,
+    RegisterName, RegisterValue, Translation, TriggerMode, Vcpu, caps,
 };
 
 use crate::acpi::{self, AcpiConfig};
 use crate::boot_cpu::{BootCpuState, Segment, boot_cpu_state, setup_boot_tables};
 use crate::cmdline::{self, Timing};
 use crate::error::{Error, Result};
+use crate::insn::{Direction, decode_movbe, load_result, store_bytes};
 use crate::ioapic::{ApicMessage, InterruptSink, IoApic};
 use crate::layout::e820_map;
 use crate::loader::{self, BootSpec};
@@ -126,13 +128,23 @@ pub struct ExitStats {
     pub halt: u64,
     /// Прочие.
     pub other: u64,
+    /// `#UD`, которые VMM выполнил сам (`MOVBE` на CPU без неё).
+    pub emulated: u64,
+    /// `#UD`, возвращённые гостю.
+    pub invalid_opcode: u64,
 }
 
 impl ExitStats {
     /// Всего выходов.
     #[must_use]
     pub fn total(&self) -> u64 {
-        self.io + self.mmio + self.cpuid + self.halt + self.other
+        self.io
+            + self.mmio
+            + self.cpuid
+            + self.halt
+            + self.other
+            + self.emulated
+            + self.invalid_opcode
     }
 
     fn add(&mut self, o: &Self) {
@@ -141,6 +153,8 @@ impl ExitStats {
         self.cpuid += o.cpuid;
         self.halt += o.halt;
         self.other += o.other;
+        self.emulated += o.emulated;
+        self.invalid_opcode += o.invalid_opcode;
     }
 }
 
@@ -350,6 +364,9 @@ impl Vm {
         let partition = Partition::new(&PartitionConfig {
             processor_count: cfg.cpus,
             cpuid_exits: Vec::new(),
+            // Перехват #UD почти ничего не стоит (нормальный код его не вызывает) и позволяет
+            // выполнять MOVBE на CPU без неё.
+            intercept_invalid_opcode: true,
         })?;
 
         let size = cfg
@@ -703,7 +720,7 @@ fn run_loop(
             Exit::UnsupportedFeature => {
                 return Err(fault(vcpu, "неподдерживаемая гипервизором возможность"));
             }
-            Exit::Exception => return Err(fault(vcpu, "необработанное исключение гостя")),
+            Exit::Exception => handle_exception(vcpu, bus, &mut stats)?,
             Exit::Msr => return Err(fault(vcpu, "неожиданный выход по MSR")),
             Exit::Other(code) => {
                 tracing::error!(code, "неизвестная причина выхода");
@@ -714,6 +731,120 @@ fn run_loop(
             return Ok((RunOutcome::Reset, stats));
         }
     }
+}
+
+/// `#UD` в госте: `MOVBE` выполняется программно, остальное возвращается гостю.
+fn handle_exception(vcpu: &mut Vcpu, bus: &mut PlatformBus, stats: &mut ExitStats) -> Result<()> {
+    const UD: u8 = 6;
+    const PF: u8 = 14;
+    let (vector, bytes) = vcpu.exception();
+    if vector != UD {
+        // Перехватывается только #UD; другое — вернуть гостю как есть.
+        vcpu.inject_exception(vector, None, 0)?;
+        return Ok(());
+    }
+    let mut code = bytes.to_vec();
+    if code.len() < 4 {
+        // WHPX может не передать байты инструкции: читаем их из памяти гостя по RIP.
+        code = fetch_code(vcpu, bus, vcpu.exit_context().VpContext.Rip)?;
+    }
+    let Some(m) = decode_movbe(&code) else {
+        stats.invalid_opcode += 1;
+        vcpu.inject_exception(UD, None, 0)?;
+        return Ok(());
+    };
+
+    // RAX…R15 (имена 0–15 совпадают с кодировкой x86), RIP, FS, GS.
+    let mut names: Vec<RegisterName> = (0..16).map(WHV_REGISTER_NAME).collect();
+    names.extend([WHvX64RegisterRip, WHvX64RegisterFs, WHvX64RegisterGs]);
+    let mut values = vec![RegisterValue::default(); names.len()];
+    vcpu.get_registers(&names, &mut values)?;
+    let mut gpr = [0_u64; 16];
+    for (g, v) in gpr.iter_mut().zip(&values) {
+        // SAFETY: значения регистров общего назначения — 64-битные.
+        *g = unsafe { v.Reg64 };
+    }
+    // SAFETY: RIP — 64-битный регистр.
+    let rip = unsafe { values[16].Reg64 };
+    // SAFETY: FS — сегментный регистр.
+    let fs = unsafe { values[17].Segment.Base };
+    // SAFETY: GS — сегментный регистр.
+    let gs = unsafe { values[18].Segment.Base };
+    let next = rip.wrapping_add(u64::from(m.len));
+    let ea = m.mem.address(&gpr, next, fs, gs);
+    let write = m.direction == Direction::Store;
+
+    // Перевод адреса по страницам (операнд до 8 байт может пересечь границу страницы).
+    let size = usize::from(m.size);
+    let mut chunks: Vec<(u64, usize)> = Vec::with_capacity(2);
+    let mut done = 0_usize;
+    while done < size {
+        let gva = ea.wrapping_add(done as u64);
+        let in_page = (0x1000 - (gva & 0xFFF)) as usize;
+        let len = in_page.min(size - done);
+        match vcpu.translate(gva, write)? {
+            Translation::Mapped(gpa) => chunks.push((gpa, len)),
+            Translation::PageFault { present } => {
+                // Ошибка страницы как от настоящей инструкции: ядро подгрузит страницу, и
+                // гость снова выполнит MOVBE.
+                let code = u32::from(present)
+                    | (u32::from(write) << 1)
+                    | (u32::from(vcpu.cpl() == 3) << 2);
+                vcpu.inject_exception(PF, Some(code), gva)?;
+                return Ok(());
+            }
+        }
+        done += len;
+    }
+
+    let mut regs: Vec<RegisterName> = vec![WHvX64RegisterRip];
+    let mut rip_value = RegisterValue::default();
+    rip_value.Reg64 = next;
+    let mut vals = vec![rip_value];
+    let reg = usize::from(m.reg & 15);
+    match m.direction {
+        Direction::Load => {
+            let mut data = [0_u8; 8];
+            let mut off = 0;
+            for (gpa, len) in &chunks {
+                bus.mmio_read(*gpa, &mut data[off..off + len]);
+                off += len;
+            }
+            let mut v = RegisterValue::default();
+            v.Reg64 = load_result(gpr[reg], &data[..size], m.size);
+            regs.push(WHV_REGISTER_NAME(i32::from(m.reg & 15)));
+            vals.push(v);
+        }
+        Direction::Store => {
+            let data = store_bytes(gpr[reg], m.size);
+            let mut off = 0;
+            for (gpa, len) in &chunks {
+                bus.mmio_write(*gpa, &data[off..off + len]);
+                off += len;
+            }
+        }
+    }
+    vcpu.set_registers(&regs, &vals)?;
+    stats.emulated += 1;
+    Ok(())
+}
+
+/// До 15 байт кода гостя с адреса `rip` (пустой вектор, если страница не отображена).
+fn fetch_code(vcpu: &Vcpu, bus: &mut PlatformBus, rip: u64) -> Result<Vec<u8>> {
+    let mut code = Vec::with_capacity(15);
+    let mut gva = rip;
+    while code.len() < 15 {
+        let Translation::Mapped(gpa) = vcpu.translate(gva, false)? else {
+            break;
+        };
+        let in_page = usize::try_from(0x1000 - (gva & 0xFFF)).unwrap_or(0x1000);
+        let len = in_page.min(15 - code.len());
+        let mut buf = vec![0_u8; len];
+        bus.mmio_read(gpa, &mut buf);
+        code.extend_from_slice(&buf);
+        gva = gva.wrapping_add(len as u64);
+    }
+    Ok(code)
 }
 
 fn fault(vcpu: &Vcpu, reason: &'static str) -> Error {

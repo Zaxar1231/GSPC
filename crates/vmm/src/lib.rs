@@ -18,6 +18,7 @@ pub mod acpi;
 pub mod boot_cpu;
 pub mod cmdline;
 mod error;
+pub mod insn;
 pub mod ioapic;
 pub mod layout;
 pub mod loader;
