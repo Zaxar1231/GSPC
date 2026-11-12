@@ -30,7 +30,7 @@ pub enum Error {
     HypervisorNotPresent,
 
     /// Вызов WHPX вернул ошибку HRESULT.
-    #[error("{call} завершился с ошибкой HRESULT 0x{hresult:08X}")]
+    #[error("{call} завершился с ошибкой HRESULT 0x{hresult:08X}{}", hint(*hresult))]
     Call {
         /// Имя вызова.
         call: &'static str,
@@ -47,6 +47,20 @@ pub enum Error {
     InvalidArgument(&'static str),
 }
 
+/// `ERROR_NO_SYSTEM_RESOURCES` как HRESULT.
+const NO_SYSTEM_RESOURCES: u32 = 0x8007_05AA;
+
+/// Пояснение к известным кодам HRESULT (пустая строка — пояснения нет).
+fn hint(hresult: u32) -> &'static str {
+    match hresult {
+        NO_SYSTEM_RESOURCES => {
+            ". Windows не хватило системных ресурсов (обычно свободной памяти) для памяти \
+             гостя: закройте тяжёлые программы или уменьшите --memory"
+        }
+        _ => "",
+    }
+}
+
 #[cfg(windows)]
 pub(crate) fn check(call: &'static str, hr: windows::core::HRESULT) -> Result<()> {
     if hr.is_ok() {
@@ -58,5 +72,29 @@ pub(crate) fn check(call: &'static str, hr: windows::core::HRESULT) -> Result<()
         )]
         let hresult = hr.0 as u32;
         Err(Error::Call { call, hresult })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn known_hresult_gets_a_hint() {
+        let e = Error::Call {
+            call: "WHvMapGpaRange",
+            hresult: NO_SYSTEM_RESOURCES,
+        };
+        let text = e.to_string();
+        assert!(text.starts_with("WHvMapGpaRange завершился с ошибкой HRESULT 0x800705AA. "));
+        assert!(text.contains("--memory"));
+        let other = Error::Call {
+            call: "WHvSetupPartition",
+            hresult: 0x8037_0001,
+        };
+        assert_eq!(
+            other.to_string(),
+            "WHvSetupPartition завершился с ошибкой HRESULT 0x80370001"
+        );
     }
 }
