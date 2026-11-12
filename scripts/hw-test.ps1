@@ -420,7 +420,7 @@ if (Test-Path $Exe) {
         Copy-Item $dll (Split-Path -Parent $Exe) -Force
         $gfxCommit = (Get-Content (Join-Path $unpacked 'gfxstream-commit.txt') -Raw).Trim()
         Ok "gfxstream_backend.dll (google/gfxstream $($gfxCommit.Substring(0, 7)))"
-        "gfxstream: $gfxCommit" | Add-Content -Path (Join-Path $Out 'system.txt') -Encoding UTF8
+        "gfxstream: $gfxCommit, sha256 $have" | Add-Content -Path (Join-Path $Out 'system.txt') -Encoding UTF8
     } catch {
         Warn "Не удалось скачать gfxstream ($_): проверка 3D покажет, что DLL нет"
     }
