@@ -95,6 +95,8 @@ jobs:
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
+          # Каталог сборки — не git-репозиторий, поэтому репозиторий для gh указываем явно.
+          GH_REPO: ${{ github.repository }}
         run: |
           $tag = 'deps-gfxstream'
           gh release delete $tag --cleanup-tag --yes 2>$null
