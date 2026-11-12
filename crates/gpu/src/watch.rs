@@ -5,6 +5,7 @@
 //! же мьютекс). Сторож — отдельный поток — замечает команду, которая идёт дольше
 //! [`STUCK_AFTER`], и пишет в лог, какая это команда, — пока поток устройства стоит.
 
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError, Weak};
 use std::time::{Duration, Instant};
@@ -15,6 +16,10 @@ const STUCK_AFTER: Duration = Duration::from_secs(3);
 const REPEAT_EVERY: Duration = Duration::from_secs(10);
 /// Сколько первых команд писать в лог (debug) целиком; дальше — только редкие.
 const LOG_FIRST: u64 = 500;
+/// Как часто писать сводку времени команд.
+const SUMMARY_EVERY: Duration = Duration::from_secs(10);
+/// Сколько видов команд показывать в сводке.
+const SUMMARY_TOP: usize = 6;
 
 /// Имя команды virtio-gpu для лога.
 pub(crate) fn command_name(kind: u32) -> &'static str {
@@ -65,11 +70,20 @@ struct Running {
     reported: Option<Instant>,
 }
 
+/// Время команд одного вида за интервал сводки.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct KindTime {
+    count: u64,
+    total: Duration,
+    max: Duration,
+}
+
 /// Текущая команда и счётчик команд; сторожевой поток держит слабую ссылку.
 #[derive(Debug, Default)]
 pub(crate) struct CommandWatch {
     running: Mutex<Option<Running>>,
     count: AtomicU64,
+    times: Mutex<HashMap<u32, KindTime>>,
 }
 
 impl CommandWatch {
@@ -107,25 +121,70 @@ impl CommandWatch {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .take();
-        if let Some(r) = done
-            && r.reported.is_some()
+        let Some(r) = done else {
+            return;
+        };
+        let spent = r.since.elapsed();
         {
+            let mut times = self.times.lock().unwrap_or_else(PoisonError::into_inner);
+            let t = times.entry(r.kind).or_default();
+            t.count += 1;
+            t.total += spent;
+            t.max = t.max.max(spent);
+        }
+        if r.reported.is_some() {
             tracing::warn!(
                 cmd = command_name(r.kind),
                 ctx = r.ctx,
-                secs = r.since.elapsed().as_secs_f32(),
+                secs = spent.as_secs_f32(),
                 "долгая команда virtio-gpu всё-таки завершилась"
             );
         }
     }
 }
 
+/// Сводка за интервал: `SUBMIT_3D×812 640.1 мс (макс 9.8), …` — самые долгие виды команд.
+fn format_summary(times: &HashMap<u32, KindTime>) -> String {
+    let mut kinds: Vec<(u32, KindTime)> = times.iter().map(|(k, t)| (*k, *t)).collect();
+    kinds.sort_by(|a, b| b.1.total.cmp(&a.1.total).then(a.0.cmp(&b.0)));
+    let shown: Vec<String> = kinds
+        .iter()
+        .take(SUMMARY_TOP)
+        .map(|(k, t)| {
+            format!(
+                "{}×{} {:.1} мс (макс {:.1})",
+                command_name(*k),
+                t.count,
+                t.total.as_secs_f64() * 1000.0,
+                t.max.as_secs_f64() * 1000.0
+            )
+        })
+        .collect();
+    shown.join(", ")
+}
+
 fn run(weak: &Weak<CommandWatch>) {
+    let mut last_summary = Instant::now();
     loop {
         std::thread::sleep(Duration::from_millis(500));
         let Some(watch) = weak.upgrade() else {
             return;
         };
+        if last_summary.elapsed() >= SUMMARY_EVERY {
+            let secs = last_summary.elapsed().as_secs_f32();
+            last_summary = Instant::now();
+            let times =
+                std::mem::take(&mut *watch.times.lock().unwrap_or_else(PoisonError::into_inner));
+            if !times.is_empty() {
+                let busy: Duration = times.values().map(|t| t.total).sum();
+                tracing::info!(
+                    secs = format_args!("{secs:.1}"),
+                    busy_pct = format_args!("{:.1}", busy.as_secs_f32() / secs * 100.0),
+                    commands = %format_summary(&times),
+                    "время команд virtio-gpu"
+                );
+            }
+        }
         let mut running = watch.running.lock().unwrap_or_else(PoisonError::into_inner);
         if let Some(r) = running.as_mut() {
             let now = Instant::now();
@@ -168,5 +227,33 @@ mod tests {
         w.end();
         assert!(w.running.lock().unwrap().is_none());
         assert_eq!(w.count.load(Ordering::Relaxed), 1);
+        let times = w.times.lock().unwrap();
+        assert_eq!(times.get(&0x0207).map(|t| t.count), Some(1));
+    }
+
+    #[test]
+    fn summary_sorted_by_total_time() {
+        let ms = Duration::from_millis;
+        let mut t = HashMap::new();
+        t.insert(
+            0x0104,
+            KindTime {
+                count: 60,
+                total: ms(30),
+                max: ms(2),
+            },
+        );
+        t.insert(
+            0x0207,
+            KindTime {
+                count: 812,
+                total: ms(640),
+                max: ms(10),
+            },
+        );
+        assert_eq!(
+            format_summary(&t),
+            "SUBMIT_3D×812 640.0 мс (макс 10.0), RESOURCE_FLUSH×60 30.0 мс (макс 2.0)"
+        );
     }
 }

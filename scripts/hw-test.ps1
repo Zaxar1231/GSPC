@@ -564,6 +564,9 @@ if ($Stages -contains 3 -and $images -and (Test-Path $Exe)) {
     Say '    1) тапните левой кнопкой мыши по значку или кнопке;' 'Yellow'
     Say '    2) сделайте свайп (зажмите левую кнопку и проведите), например потяните шторку сверху;' 'Yellow'
     Say '    3) откройте поле ввода (поиск) и напечатайте что-нибудь с клавиатуры.' 'Yellow'
+    Say '    4) для замера скорости: 30 секунд подряд листайте список (Настройки или все' 'Yellow'
+    Say '       приложения) и запомните FPS в оверлее. На неподвижном экране Android не рисует' 'Yellow'
+    Say '       новых кадров — FPS там не показатель.' 'Yellow'
     Say '  Когда Android загрузится, скрипт подаст звук. Проверьте и закройте окно —' 'Yellow'
     Say "  ждать все $Stage3Seconds с не нужно." 'Yellow'
     Say '  Скриншоты окна делаются автоматически раз в 30 секунд (только окно RustDroid).' 'Yellow'
@@ -624,6 +627,14 @@ if ($Stages -contains 3 -and $images -and (Test-Path $Exe)) {
     } else {
         Warn 'stage3: нет строк «кадры гостя» — экран мог не появиться'
     }
+    # Профиль: загрузка CPU по потокам и время команд virtio-gpu (раз в 10 с).
+    $perf = Select-String -Path (Join-Path $Out 'stage3-stderr.log'), (Join-Path $Out 'stage3-stdout.log') `
+        -Pattern 'кадры гостя', 'профиль CPU', 'время команд virtio-gpu' -SimpleMatch -Encoding UTF8 -ErrorAction SilentlyContinue
+    if ($perf) {
+        $perf | ForEach-Object { $_.Line -replace '\x1b\[[0-9;]*m', '' } |
+            Set-Content (Join-Path $Out 'stage3-perf.txt') -Encoding UTF8
+        Ok 'stage3: профиль производительности в stage3-perf.txt'
+    }
 
     Step 'Ваши наблюдения'
     $answers = @()
@@ -633,6 +644,7 @@ if ($Stages -contains 3 -and $images -and (Test-Path $Exe)) {
             'Работает ли свайп?',
             'Работает ли ввод с клавиатуры?',
             'Видны ли оверлей FPS и график в углу?',
+            'Какой FPS в оверлее, пока листаете список? (число или «не мерил»)',
             'Что-то ещё (подвисания, артефакты, ошибки)?')) {
         $a = if ($Yes) { '(не спрашивали: -Yes)' } else { Read-Host "  $q" }
         $answers += "$q`n  -> $a"
