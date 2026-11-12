@@ -10,6 +10,9 @@
 
 ### Fixed
 
+- `libcrypto` (BoringSSL) падал на CPU без AES-NI (Core i3 Sandy/Ivy Bridge и др.): он
+  собран с `-maes` и не проверяет CPUID. VMM выполняет `AESENC`, `AESENCLAST`, `AESDEC`,
+  `AESDECLAST`, `AESIMC`, `AESKEYGENASSIST` и `PCLMULQDQ` программно (проверено по FIPS-197).
 - Android падал в `init` (`invalid opcode`) на CPU без `MOVBE` (Intel до Haswell, например
   Core i3-3220; AMD до Jaguar/Zen): образы Cuttlefish собраны под Silvermont. VMM перехватывает
   `#UD` и выполняет `MOVBE` сам (декодер `insn`, перевод адресов, `#PF` для неподгруженных

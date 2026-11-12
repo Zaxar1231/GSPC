@@ -5,8 +5,13 @@
 //! Jaguar/Zen её нет: гость получает `#UD` и падает уже в `init`. VMM перехватывает `#UD`,
 //! декодирует `MOVBE` и выполняет её сам; остальные `#UD` возвращает гостю как есть.
 //!
+//! Так же выполняются инструкции AES-NI (см. [`crate::aesni`]): у бюджетных Core i3 того же
+//! поколения их нет, а BoringSSL в Android их требует.
+//!
 //! Здесь только декодирование и арифметика (тестируются на любой платформе); доступ к
 //! регистрам и памяти гостя — в цикле vCPU.
+
+use crate::aesni::AesOp;
 
 /// Сегмент с ненулевой базой в 64-битном режиме.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -87,64 +92,92 @@ impl MemOperand {
     }
 }
 
-/// Декодирует `MOVBE` в 64-битном режиме. `None` — это не `MOVBE` (или форма, которой на
-/// реальном CPU тоже нет, например регистр–регистр): такой `#UD` возвращается гостю.
-#[must_use]
-pub fn decode_movbe(bytes: &[u8]) -> Option<Movbe> {
-    let mut i = 0_usize;
-    let mut opsize16 = false;
-    let mut addr32 = false;
-    let mut segment = None;
-    let mut rex = 0_u8;
-    // Префиксы (не больше 14 байт до опкода, как у CPU).
+/// Операнд ModRM.r/m.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Operand {
+    /// Регистр (0–15): общего назначения или XMM, по контексту инструкции.
+    Reg(u8),
+    /// Память.
+    Mem(MemOperand),
+}
+
+/// Декодированная инструкция AES-NI.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Aes {
+    /// Длина инструкции, байт.
+    pub len: u8,
+    /// Операция.
+    pub op: AesOp,
+    /// Регистр XMM назначения (первый операнд).
+    pub dst: u8,
+    /// Второй операнд: XMM или 16 байт памяти.
+    pub src: Operand,
+}
+
+/// Инструкция, которую VMM умеет выполнить программно.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Insn {
+    /// `MOVBE`.
+    Movbe(Movbe),
+    /// AES-NI.
+    Aes(Aes),
+}
+
+#[derive(Debug, Default)]
+struct Prefixes {
+    len: usize,
+    opsize16: bool,
+    addr32: bool,
+    segment: Option<Segment>,
+    rex: u8,
+    rep: bool,
+}
+
+fn parse_prefixes(bytes: &[u8]) -> Option<Prefixes> {
+    let mut p = Prefixes::default();
     loop {
-        let b = *bytes.get(i)?;
+        let b = *bytes.get(p.len)?;
         match b {
-            0x66 => opsize16 = true,
-            0x67 => addr32 = true,
-            0x64 => segment = Some(Segment::Fs),
-            0x65 => segment = Some(Segment::Gs),
+            0x66 => p.opsize16 = true,
+            0x67 => p.addr32 = true,
+            0x64 => p.segment = Some(Segment::Fs),
+            0x65 => p.segment = Some(Segment::Gs),
             0x26 | 0x2E | 0x36 | 0x3E => {}
-            // F2 0F 38 F0/F1 — CRC32 (есть у хоста), F3 — недопустимо, LOCK — #UD.
-            0xF0 | 0xF2 | 0xF3 => return None,
+            // F2/F3 меняют смысл опкода (например, F2 0F 38 F1 — CRC32), LOCK — #UD.
+            0xF2 | 0xF3 => p.rep = true,
+            0xF0 => return None,
             0x40..=0x4F => {
-                // REX — последний префикс перед опкодом.
-                rex = b;
-                i += 1;
-                break;
+                // REX — последний префикс перед опкодом; два REX подряд не поддерживаем.
+                p.rex = b;
+                p.len += 1;
+                if bytes.get(p.len).is_some_and(|b| (0x40..=0x4F).contains(b)) {
+                    return None;
+                }
+                return Some(p);
             }
-            _ => break,
+            _ => return Some(p),
         }
-        i += 1;
-        if i > 14 {
+        p.len += 1;
+        if p.len > 14 {
             return None;
         }
     }
-    if rex != 0 && bytes.get(i).is_some_and(|b| (0x40..=0x4F).contains(b)) {
-        return None;
-    }
-    if bytes.get(i..i + 3)? != [0x0F, 0x38, 0xF0] && bytes.get(i..i + 3)? != [0x0F, 0x38, 0xF1] {
-        return None;
-    }
-    let direction = if bytes[i + 2] == 0xF0 {
-        Direction::Load
-    } else {
-        Direction::Store
-    };
-    i += 3;
+}
+
+/// Разбирает ModRM (+SIB, смещение) с позиции `i`. Возвращает (новую позицию, поле reg с
+/// REX.R, операнд r/m).
+fn parse_modrm(bytes: &[u8], mut i: usize, p: &Prefixes) -> Option<(usize, u8, Operand)> {
     let modrm = *bytes.get(i)?;
     i += 1;
     let md = modrm >> 6;
-    if md == 3 {
-        return None;
-    }
-    let rex_w = rex & 8 != 0;
-    let rex_r = (rex >> 2) & 1;
-    let rex_x = (rex >> 1) & 1;
-    let rex_b = rex & 1;
+    let rex_r = (p.rex >> 2) & 1;
+    let rex_x = (p.rex >> 1) & 1;
+    let rex_b = p.rex & 1;
     let reg = ((modrm >> 3) & 7) | (rex_r << 3);
     let rm = modrm & 7;
-
+    if md == 3 {
+        return Some((i, reg, Operand::Reg(rm | (rex_b << 3))));
+    }
     let mut base = None;
     let mut index = None;
     let mut rip_relative = false;
@@ -179,27 +212,89 @@ pub fn decode_movbe(bytes: &[u8]) -> Option<Movbe> {
         _ => 0,
     };
     i += disp_len;
-    let size = if rex_w {
-        8
-    } else if opsize16 {
-        2
-    } else {
-        4
-    };
-    Some(Movbe {
-        len: u8::try_from(i).ok()?,
-        direction,
-        size,
+    Some((
+        i,
         reg,
-        mem: MemOperand {
+        Operand::Mem(MemOperand {
             base,
             index,
             disp,
             rip_relative,
-            segment,
-            addr32,
-        },
-    })
+            segment: p.segment,
+            addr32: p.addr32,
+        }),
+    ))
+}
+
+/// Декодирует инструкцию, которую VMM умеет выполнить программно. `None` — другая
+/// инструкция (или форма, которой нет и на реальном CPU): такой `#UD` возвращается гостю.
+#[must_use]
+pub fn decode(bytes: &[u8]) -> Option<Insn> {
+    let p = parse_prefixes(bytes)?;
+    let i = p.len;
+    let op = bytes.get(i..i + 3)?;
+    match op {
+        // MOVBE: 0F 38 F0 (загрузка) / F1 (запись), только с памятью и без F2/F3.
+        [0x0F, 0x38, 0xF0 | 0xF1] if !p.rep => {
+            let (end, reg, Operand::Mem(mem)) = parse_modrm(bytes, i + 3, &p)? else {
+                return None;
+            };
+            Some(Insn::Movbe(Movbe {
+                len: u8::try_from(end).ok()?,
+                direction: if op[2] == 0xF0 {
+                    Direction::Load
+                } else {
+                    Direction::Store
+                },
+                size: if p.rex & 8 != 0 {
+                    8
+                } else if p.opsize16 {
+                    2
+                } else {
+                    4
+                },
+                reg,
+                mem,
+            }))
+        }
+        // AES-NI: обязательный префикс 66, без F2/F3.
+        [0x0F, 0x38, 0xDB..=0xDF] | [0x0F, 0x3A, 0xDF | 0x44] if p.opsize16 && !p.rep => {
+            let (mut end, dst, src) = parse_modrm(bytes, i + 3, &p)?;
+            let aes = match op {
+                [0x0F, 0x38, 0xDB] => AesOp::Imc,
+                [0x0F, 0x38, 0xDC] => AesOp::Enc,
+                [0x0F, 0x38, 0xDD] => AesOp::EncLast,
+                [0x0F, 0x38, 0xDE] => AesOp::Dec,
+                [0x0F, 0x38, 0xDF] => AesOp::DecLast,
+                [0x0F, 0x3A, 0x44] => {
+                    let imm = *bytes.get(end)?;
+                    end += 1;
+                    AesOp::Pclmul(imm)
+                }
+                _ => {
+                    let imm = *bytes.get(end)?;
+                    end += 1;
+                    AesOp::KeygenAssist(imm)
+                }
+            };
+            Some(Insn::Aes(Aes {
+                len: u8::try_from(end).ok()?,
+                op: aes,
+                dst,
+                src,
+            }))
+        }
+        _ => None,
+    }
+}
+
+/// Декодирует `MOVBE` (см. [`decode`]).
+#[must_use]
+pub fn decode_movbe(bytes: &[u8]) -> Option<Movbe> {
+    match decode(bytes)? {
+        Insn::Movbe(m) => Some(m),
+        Insn::Aes(_) => None,
+    }
 }
 
 /// Значение регистра после `MOVBE` reg ← mem: 32-битная запись обнуляет старшую половину,
@@ -267,6 +362,60 @@ mod tests {
         assert!(decode_movbe(&[0x0F, 0x38, 0xF0, 0x44]).is_none());
         // Два REX подряд компиляторы не генерируют — считаем это не MOVBE.
         assert!(decode_movbe(&[0x48, 0x48, 0x0F, 0x38, 0xF0, 0x00]).is_none());
+    }
+
+    #[test]
+    fn decodes_aesni() {
+        // aesenclast %xmm4,%xmm0 — инструкция, на которой падал libcrypto на i3-3220.
+        let Some(Insn::Aes(a)) = decode(&[0x66, 0x0F, 0x38, 0xDD, 0xC4, 0x66]) else {
+            panic!("не AES");
+        };
+        assert_eq!(
+            (a.len, a.op, a.dst, a.src),
+            (5, AesOp::EncLast, 0, Operand::Reg(4))
+        );
+        // aesenc 0x10(%rdi),%xmm9 : 66 44 0F 38 DC 4F 10
+        let Some(Insn::Aes(a)) = decode(&[0x66, 0x44, 0x0F, 0x38, 0xDC, 0x4F, 0x10]) else {
+            panic!("не AES");
+        };
+        assert_eq!((a.len, a.op, a.dst), (7, AesOp::Enc, 9));
+        assert!(matches!(a.src, Operand::Mem(m) if m.base == Some(7) && m.disp == 0x10));
+        // aeskeygenassist $0x1b,%xmm1,%xmm2 : 66 0F 3A DF D1 1B
+        let Some(Insn::Aes(a)) = decode(&[0x66, 0x0F, 0x3A, 0xDF, 0xD1, 0x1B]) else {
+            panic!("не AES");
+        };
+        assert_eq!(
+            (a.len, a.op, a.dst, a.src),
+            (6, AesOp::KeygenAssist(0x1B), 2, Operand::Reg(1))
+        );
+        // aesimc %xmm3,%xmm3 и aesdec/aesdeclast.
+        assert!(matches!(
+            decode(&[0x66, 0x0F, 0x38, 0xDB, 0xDB]),
+            Some(Insn::Aes(Aes { op: AesOp::Imc, .. }))
+        ));
+        assert!(matches!(
+            decode(&[0x66, 0x0F, 0x38, 0xDE, 0xC1]),
+            Some(Insn::Aes(Aes { op: AesOp::Dec, .. }))
+        ));
+        assert!(matches!(
+            decode(&[0x66, 0x0F, 0x38, 0xDF, 0xC1]),
+            Some(Insn::Aes(Aes {
+                op: AesOp::DecLast,
+                ..
+            }))
+        ));
+        // pclmulqdq $0x11,%xmm1,%xmm0 : 66 0F 3A 44 C1 11
+        assert!(matches!(
+            decode(&[0x66, 0x0F, 0x3A, 0x44, 0xC1, 0x11]),
+            Some(Insn::Aes(Aes {
+                len: 6,
+                op: AesOp::Pclmul(0x11),
+                dst: 0,
+                src: Operand::Reg(1)
+            }))
+        ));
+        // Без префикса 66 это не AES-NI.
+        assert!(decode(&[0x0F, 0x38, 0xDD, 0xC4]).is_none());
     }
 
     #[test]

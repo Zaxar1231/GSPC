@@ -15,6 +15,7 @@
 //! `host` (P-ядра, MMCSS).
 
 pub mod acpi;
+pub mod aesni;
 pub mod boot_cpu;
 pub mod cmdline;
 mod error;

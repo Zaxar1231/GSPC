@@ -26,10 +26,11 @@ use rustdroid_whpx::{
 };
 
 use crate::acpi::{self, AcpiConfig};
+use crate::aesni;
 use crate::boot_cpu::{BootCpuState, Segment, boot_cpu_state, setup_boot_tables};
 use crate::cmdline::{self, Timing};
 use crate::error::{Error, Result};
-use crate::insn::{Direction, decode_movbe, load_result, store_bytes};
+use crate::insn::{Aes, Direction, Insn, Movbe, Operand, decode, load_result, store_bytes};
 use crate::ioapic::{ApicMessage, InterruptSink, IoApic};
 use crate::layout::e820_map;
 use crate::loader::{self, BootSpec};
@@ -733,12 +734,89 @@ fn run_loop(
     }
 }
 
-/// `#UD` в госте: `MOVBE` выполняется программно, остальное возвращается гостю.
+const VECTOR_UD: u8 = 6;
+const VECTOR_PF: u8 = 14;
+/// Первый регистр XMM в нумерации WHPX (`WHvX64RegisterXmm0`).
+const WHV_XMM0: i32 = 0x1000;
+
+/// Состояние гостя, нужное для эмуляции одной инструкции.
+struct EmuContext {
+    gpr: [u64; 16],
+    rip: u64,
+    fs: u64,
+    gs: u64,
+}
+
+impl EmuContext {
+    fn read(vcpu: &Vcpu) -> Result<Self> {
+        // RAX…R15 (имена 0–15 совпадают с кодировкой x86), RIP, FS, GS.
+        let mut names: Vec<RegisterName> = (0..16).map(WHV_REGISTER_NAME).collect();
+        names.extend([WHvX64RegisterRip, WHvX64RegisterFs, WHvX64RegisterGs]);
+        let mut values = vec![RegisterValue::default(); names.len()];
+        vcpu.get_registers(&names, &mut values)?;
+        let mut gpr = [0_u64; 16];
+        for (g, v) in gpr.iter_mut().zip(&values) {
+            // SAFETY: значения регистров общего назначения — 64-битные.
+            *g = unsafe { v.Reg64 };
+        }
+        // SAFETY: RIP — 64-битный регистр.
+        let rip = unsafe { values[16].Reg64 };
+        // SAFETY: FS — сегментный регистр.
+        let fs = unsafe { values[17].Segment.Base };
+        // SAFETY: GS — сегментный регистр.
+        let gs = unsafe { values[18].Segment.Base };
+        Ok(Self { gpr, rip, fs, gs })
+    }
+}
+
+/// Куски физической памяти гостя для `size` байт с адреса `ea` (по страницам). `None` —
+/// гостю поставлен `#PF`, инструкция повторится после его обработки.
+fn guest_chunks(
+    vcpu: &Vcpu,
+    ea: u64,
+    size: usize,
+    write: bool,
+) -> Result<Option<Vec<(u64, usize)>>> {
+    let mut chunks = Vec::with_capacity(2);
+    let mut done = 0_usize;
+    while done < size {
+        let gva = ea.wrapping_add(done as u64);
+        let in_page = usize::try_from(0x1000 - (gva & 0xFFF)).unwrap_or(0x1000);
+        let len = in_page.min(size - done);
+        match vcpu.translate(gva, write)? {
+            Translation::Mapped(gpa) => chunks.push((gpa, len)),
+            Translation::PageFault { present } => {
+                // Ошибка страницы как от настоящей инструкции.
+                let code = u32::from(present)
+                    | (u32::from(write) << 1)
+                    | (u32::from(vcpu.cpl() == 3) << 2);
+                vcpu.inject_exception(VECTOR_PF, Some(code), gva)?;
+                return Ok(None);
+            }
+        }
+        done += len;
+    }
+    Ok(Some(chunks))
+}
+
+fn read_chunks(bus: &mut PlatformBus, chunks: &[(u64, usize)], out: &mut [u8]) {
+    let mut off = 0;
+    for (gpa, len) in chunks {
+        bus.mmio_read(*gpa, &mut out[off..off + len]);
+        off += len;
+    }
+}
+
+fn reg64(v: u64) -> RegisterValue {
+    let mut r = RegisterValue::default();
+    r.Reg64 = v;
+    r
+}
+
+/// `#UD` в госте: `MOVBE` и AES-NI выполняются программно, остальное возвращается гостю.
 fn handle_exception(vcpu: &mut Vcpu, bus: &mut PlatformBus, stats: &mut ExitStats) -> Result<()> {
-    const UD: u8 = 6;
-    const PF: u8 = 14;
     let (vector, bytes) = vcpu.exception();
-    if vector != UD {
+    if vector != VECTOR_UD {
         // Перехватывается только #UD; другое — вернуть гостю как есть.
         vcpu.inject_exception(vector, None, 0)?;
         return Ok(());
@@ -748,75 +826,42 @@ fn handle_exception(vcpu: &mut Vcpu, bus: &mut PlatformBus, stats: &mut ExitStat
         // WHPX может не передать байты инструкции: читаем их из памяти гостя по RIP.
         code = fetch_code(vcpu, bus, vcpu.exit_context().VpContext.Rip)?;
     }
-    let Some(m) = decode_movbe(&code) else {
+    let Some(insn) = decode(&code) else {
         stats.invalid_opcode += 1;
-        vcpu.inject_exception(UD, None, 0)?;
+        vcpu.inject_exception(VECTOR_UD, None, 0)?;
         return Ok(());
     };
-
-    // RAX…R15 (имена 0–15 совпадают с кодировкой x86), RIP, FS, GS.
-    let mut names: Vec<RegisterName> = (0..16).map(WHV_REGISTER_NAME).collect();
-    names.extend([WHvX64RegisterRip, WHvX64RegisterFs, WHvX64RegisterGs]);
-    let mut values = vec![RegisterValue::default(); names.len()];
-    vcpu.get_registers(&names, &mut values)?;
-    let mut gpr = [0_u64; 16];
-    for (g, v) in gpr.iter_mut().zip(&values) {
-        // SAFETY: значения регистров общего назначения — 64-битные.
-        *g = unsafe { v.Reg64 };
+    let ctx = EmuContext::read(vcpu)?;
+    let done = match insn {
+        Insn::Movbe(m) => emulate_movbe(vcpu, bus, &ctx, &m)?,
+        Insn::Aes(a) => emulate_aes(vcpu, bus, &ctx, &a)?,
+    };
+    if done {
+        stats.emulated += 1;
     }
-    // SAFETY: RIP — 64-битный регистр.
-    let rip = unsafe { values[16].Reg64 };
-    // SAFETY: FS — сегментный регистр.
-    let fs = unsafe { values[17].Segment.Base };
-    // SAFETY: GS — сегментный регистр.
-    let gs = unsafe { values[18].Segment.Base };
-    let next = rip.wrapping_add(u64::from(m.len));
-    let ea = m.mem.address(&gpr, next, fs, gs);
+    Ok(())
+}
+
+fn emulate_movbe(vcpu: &Vcpu, bus: &mut PlatformBus, ctx: &EmuContext, m: &Movbe) -> Result<bool> {
+    let next = ctx.rip.wrapping_add(u64::from(m.len));
+    let ea = m.mem.address(&ctx.gpr, next, ctx.fs, ctx.gs);
     let write = m.direction == Direction::Store;
-
-    // Перевод адреса по страницам (операнд до 8 байт может пересечь границу страницы).
     let size = usize::from(m.size);
-    let mut chunks: Vec<(u64, usize)> = Vec::with_capacity(2);
-    let mut done = 0_usize;
-    while done < size {
-        let gva = ea.wrapping_add(done as u64);
-        let in_page = (0x1000 - (gva & 0xFFF)) as usize;
-        let len = in_page.min(size - done);
-        match vcpu.translate(gva, write)? {
-            Translation::Mapped(gpa) => chunks.push((gpa, len)),
-            Translation::PageFault { present } => {
-                // Ошибка страницы как от настоящей инструкции: ядро подгрузит страницу, и
-                // гость снова выполнит MOVBE.
-                let code = u32::from(present)
-                    | (u32::from(write) << 1)
-                    | (u32::from(vcpu.cpl() == 3) << 2);
-                vcpu.inject_exception(PF, Some(code), gva)?;
-                return Ok(());
-            }
-        }
-        done += len;
-    }
-
-    let mut regs: Vec<RegisterName> = vec![WHvX64RegisterRip];
-    let mut rip_value = RegisterValue::default();
-    rip_value.Reg64 = next;
-    let mut vals = vec![rip_value];
+    let Some(chunks) = guest_chunks(vcpu, ea, size, write)? else {
+        return Ok(false);
+    };
     let reg = usize::from(m.reg & 15);
+    let mut names: Vec<RegisterName> = vec![WHvX64RegisterRip];
+    let mut values = vec![reg64(next)];
     match m.direction {
         Direction::Load => {
             let mut data = [0_u8; 8];
-            let mut off = 0;
-            for (gpa, len) in &chunks {
-                bus.mmio_read(*gpa, &mut data[off..off + len]);
-                off += len;
-            }
-            let mut v = RegisterValue::default();
-            v.Reg64 = load_result(gpr[reg], &data[..size], m.size);
-            regs.push(WHV_REGISTER_NAME(i32::from(m.reg & 15)));
-            vals.push(v);
+            read_chunks(bus, &chunks, &mut data[..size]);
+            names.push(WHV_REGISTER_NAME(i32::from(m.reg & 15)));
+            values.push(reg64(load_result(ctx.gpr[reg], &data[..size], m.size)));
         }
         Direction::Store => {
-            let data = store_bytes(gpr[reg], m.size);
+            let data = store_bytes(ctx.gpr[reg], m.size);
             let mut off = 0;
             for (gpa, len) in &chunks {
                 bus.mmio_write(*gpa, &data[off..off + len]);
@@ -824,9 +869,53 @@ fn handle_exception(vcpu: &mut Vcpu, bus: &mut PlatformBus, stats: &mut ExitStat
             }
         }
     }
-    vcpu.set_registers(&regs, &vals)?;
-    stats.emulated += 1;
-    Ok(())
+    vcpu.set_registers(&names, &values)?;
+    Ok(true)
+}
+
+fn xmm_name(n: u8) -> RegisterName {
+    WHV_REGISTER_NAME(WHV_XMM0 + i32::from(n & 15))
+}
+
+fn read_xmm(vcpu: &Vcpu, n: u8) -> Result<[u8; 16]> {
+    let mut v = [RegisterValue::default()];
+    vcpu.get_registers(&[xmm_name(n)], &mut v)?;
+    // SAFETY: регистр XMM — 128-битный, значение инициализировано WHPX.
+    let wide = unsafe { v[0].Reg128 };
+    // SAFETY: WHV_UINT128 — объединение двух представлений одних и тех же 16 байт.
+    let half = unsafe { wide.Anonymous };
+    let (lo, hi) = (half.Low64, half.High64);
+    let mut out = [0_u8; 16];
+    out[..8].copy_from_slice(&lo.to_le_bytes());
+    out[8..].copy_from_slice(&hi.to_le_bytes());
+    Ok(out)
+}
+
+fn emulate_aes(vcpu: &Vcpu, bus: &mut PlatformBus, ctx: &EmuContext, a: &Aes) -> Result<bool> {
+    let next = ctx.rip.wrapping_add(u64::from(a.len));
+    let src = match a.src {
+        Operand::Reg(r) => read_xmm(vcpu, r)?,
+        Operand::Mem(mem) => {
+            let ea = mem.address(&ctx.gpr, next, ctx.fs, ctx.gs);
+            let Some(chunks) = guest_chunks(vcpu, ea, 16, false)? else {
+                return Ok(false);
+            };
+            let mut data = [0_u8; 16];
+            read_chunks(bus, &chunks, &mut data);
+            data
+        }
+    };
+    let dst = read_xmm(vcpu, a.dst)?;
+    let out = aesni::execute(a.op, &dst, &src);
+    let mut xmm = RegisterValue::default();
+    let mut lo = [0_u8; 8];
+    let mut hi = [0_u8; 8];
+    lo.copy_from_slice(&out[..8]);
+    hi.copy_from_slice(&out[8..]);
+    xmm.Reg128.Anonymous.Low64 = u64::from_le_bytes(lo);
+    xmm.Reg128.Anonymous.High64 = u64::from_le_bytes(hi);
+    vcpu.set_registers(&[xmm_name(a.dst), WHvX64RegisterRip], &[xmm, reg64(next)])?;
+    Ok(true)
 }
 
 /// До 15 байт кода гостя с адреса `rip` (пустой вектор, если страница не отображена).
