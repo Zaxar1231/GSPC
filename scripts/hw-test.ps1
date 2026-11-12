@@ -27,6 +27,9 @@
 
 .PARAMETER FromSource
     Собрать из исходников вместо готового rustdroid.exe.
+
+.PARAMETER CheckOnly
+    Только проверка системы и 3D (Vulkan, gfxstream) — без образов и запуска Android, ~1 мин.
 #>
 [CmdletBinding()]
 param(
@@ -43,6 +46,7 @@ param(
     [string]$KernelBuild = 'latest',
     [switch]$SkipBuild,
     [switch]$FromSource,
+    [switch]$CheckOnly,
     [switch]$Yes
 )
 
@@ -55,6 +59,7 @@ try {
 } catch { }
 
 $RepoUrl = 'https://github.com/Zaxar1231/GSPC.git'
+if ($CheckOnly) { $Stages = @() }
 $Stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
 $Desktop = [Environment]::GetFolderPath('Desktop')
 if (-not $Desktop) { $Desktop = $HOME }
@@ -377,10 +382,40 @@ if ($FromSource) {
     Set-Location $Work
 }
 
+# gfxstream (3D на видеокарте): DLL из pre-release deps-gfxstream кладётся рядом с rustdroid.exe.
+if (Test-Path $Exe) {
+    Step 'gfxstream (3D)'
+    $zip = Join-Path $Work 'gfxstream-windows-x64.zip'
+    $unpacked = Join-Path $Work 'gfxstream'
+    try {
+        Download "https://github.com/$Owner/$RepoName/releases/download/deps-gfxstream/gfxstream-windows-x64.zip" $zip
+        if (Test-Path $unpacked) { Remove-Item $unpacked -Recurse -Force }
+        Expand-Archive -Path $zip -DestinationPath $unpacked -Force
+        $dll = Join-Path $unpacked 'gfxstream_backend.dll'
+        $want = (Get-Content (Join-Path $unpacked 'gfxstream_backend.dll.sha256') -Raw).Trim().ToLower()
+        $have = (Get-FileHash -Algorithm SHA256 $dll).Hash.ToLower()
+        if ($have -ne $want) { throw "sha256 не совпал: $have" }
+        Copy-Item $dll (Split-Path -Parent $Exe) -Force
+        $gfxCommit = (Get-Content (Join-Path $unpacked 'gfxstream-commit.txt') -Raw).Trim()
+        Ok "gfxstream_backend.dll (google/gfxstream $($gfxCommit.Substring(0, 7)))"
+        "gfxstream: $gfxCommit" | Add-Content -Path (Join-Path $Out 'system.txt') -Encoding UTF8
+    } catch {
+        Warn "Не удалось скачать gfxstream ($_): проверка 3D покажет, что DLL нет"
+    }
+}
+
 if (Test-Path $Exe) {
     Step 'rustdroid check'
-    $rc = Run-Logged $Exe @('check') (Join-Path $Out 'check.log')
+    # -v: в check.log попадают сообщения драйвера Vulkan и gfxstream.
+    $checkLog = Join-Path $Out 'check.log'
+    $rc = Run-Logged $Exe @('-v', 'check') $checkLog
     if ($rc -eq 0) { Ok 'rustdroid check: система готова' } else { Fail "rustdroid check: код $rc (check.log)" }
+    # Итог по 3D — отдельными строками в summary.txt.
+    foreach ($m in Select-String -Path $checkLog -Pattern '\[( OK |WARN)\] (.*)$') {
+        $text = $m.Matches[0].Groups[2].Value -replace "$([char]27)\[[0-9;]*m", ''
+        if ($text -notmatch '^(Vulkan|gfxstream|проверка 3D)') { continue }
+        if ($m.Matches[0].Groups[1].Value -eq ' OK ') { Ok $text } else { Warn $text }
+    }
 }
 
 # ------------------------------------------------------------ гость ---

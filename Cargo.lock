@@ -467,6 +467,7 @@ dependencies = [
  "anyhow",
  "clap",
  "rustdroid-devices",
+ "rustdroid-gfxstream",
  "rustdroid-gpu",
  "rustdroid-input",
  "rustdroid-instance",

@@ -18,6 +18,12 @@
   гостю только после выполнения фенса (по кольцам контекстов и глобальной шкале). Исполнитель —
   трейт `Backend3d`; реализация на gfxstream (`rustdroid_gpu::gfxstream`, Windows).
   В эмулятор пока не подключено (задача 4.4).
+- `rustdroid check` проверяет 3D: видеокарты и версию Vulkan (через `vulkan-1.dll`) и запуск
+  gfxstream на Vulkan. Проверка идёт в дочернем процессе `rustdroid gpu-probe`, чтобы падение
+  драйвера не роняло `check`; отсутствие 3D — предупреждение, а не ошибка.
+- `hw-test.ps1` кладёт `gfxstream_backend.dll` рядом с `rustdroid.exe`, запускает
+  `rustdroid -v check` и выносит итог по 3D в `summary.txt`; `-CheckOnly` — только проверка,
+  без образов и Android.
 
 ### Changed
 

@@ -25,6 +25,9 @@ pub(crate) enum Command {
     Boot(BootArgs),
     /// Загрузить Android из каталога образов Cuttlefish x86_64.
     BootAndroid(AndroidArgs),
+    /// Проверка 3D (Vulkan и gfxstream) в отдельном процессе; её запускает `check`.
+    #[command(hide = true)]
+    GpuProbe,
 }
 
 /// Куда направлять ввод с клавиатуры.
