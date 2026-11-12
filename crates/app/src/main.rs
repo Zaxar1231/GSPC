@@ -13,6 +13,8 @@ mod cli;
 #[cfg(windows)]
 mod console;
 #[cfg(windows)]
+mod crash;
+#[cfg(windows)]
 mod display;
 #[cfg(windows)]
 mod gpu_probe;
@@ -42,6 +44,8 @@ pub static AmdPowerXpressRequestHighPerformance: i32 = 1;
 fn main() -> Result<()> {
     let cli = Cli::parse();
     init_tracing(cli.verbose);
+    #[cfg(windows)]
+    crash::install();
     tracing::debug!(version = env!("CARGO_PKG_VERSION"), "RustDroid запускается");
     run(cli.command.unwrap_or(Command::Check), cli.verbose)
 }

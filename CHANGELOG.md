@@ -24,6 +24,9 @@
 - `boot-android --gpu gfxstream` (задача 4.4): virtio-gpu с 3D на gfxstream и параметры гостя
   как `gfxstream_guest_angle` у Cuttlefish. По умолчанию `--gpu software`. `hw-test.ps1 -Gpu`
   (`auto` — gfxstream, если его прошла проверка 3D).
+- Отчёт о падении: фильтр необработанных исключений пишет в stderr код, модуль и смещение
+  инструкции, адрес возврата и адреса из стека; CI публикует `rustdroid.pdb` и
+  `gfxstream_backend.pdb`, по которым эти адреса переводятся в функции.
 - Диагностика 3D: команды virtio-gpu в логе (`-v`), сторож пишет, какая команда не завершается
   дольше 3 с (поток устройства ждёт gfxstream); `hw-test.ps1` сохраняет код выхода этапа 3 и
   запись о сбое процесса из журнала Windows (`stage3-crash.txt`).

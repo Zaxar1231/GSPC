@@ -83,12 +83,19 @@ jobs:
           $hash = (Get-FileHash -Algorithm SHA256 (Join-Path $out 'gfxstream_backend.dll')).Hash.ToLower()
           Set-Content (Join-Path $out 'gfxstream_backend.dll.sha256') $hash -NoNewline
           Compress-Archive -Path (Join-Path $out '*') -DestinationPath (Join-Path $env:RUNNER_TEMP 'gfxstream-windows-x64.zip')
+          # Символы отдельным архивом (≈50 МБ): нужны только для разбора падений внутри DLL.
+          $pdb = Get-ChildItem build -Recurse -Filter gfxstream_backend.pdb | Select-Object -First 1
+          if ($pdb) {
+            Compress-Archive -Path $pdb.FullName -DestinationPath (Join-Path $env:RUNNER_TEMP 'gfxstream-windows-x64-pdb.zip')
+          }
           "sha256 $hash"
 
       - uses: actions/upload-artifact@v4
         with:
           name: gfxstream-windows-x64
-          path: ${{ runner.temp }}/gfxstream-windows-x64.zip
+          path: |
+            ${{ runner.temp }}/gfxstream-windows-x64.zip
+            ${{ runner.temp }}/gfxstream-windows-x64-pdb.zip
 
       - name: Публикация в pre-release deps-gfxstream
         if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/feat/')
@@ -103,5 +110,6 @@ jobs:
           $global:LASTEXITCODE = 0
           gh release create $tag --prerelease --target '${{ github.sha }}' --title 'gfxstream (Windows x64)' `
             --notes "gfxstream_backend.dll из google/gfxstream@$env:GFXSTREAM_COMMIT (Apache-2.0)." `
-            (Join-Path $env:RUNNER_TEMP 'gfxstream-windows-x64.zip')
+            (Join-Path $env:RUNNER_TEMP 'gfxstream-windows-x64.zip') `
+            (Join-Path $env:RUNNER_TEMP 'gfxstream-windows-x64-pdb.zip')
           if ($LASTEXITCODE -ne 0) { exit 1 }
