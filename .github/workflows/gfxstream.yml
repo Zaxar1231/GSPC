@@ -18,6 +18,9 @@ concurrency:
   cancel-in-progress: false
 
 env:
+  # windows.h без WIN32_LEAN_AND_MEAN тянет старый winsock.h, который конфликтует с
+  # winsock2.h в новых Windows SDK. CL — дополнительные флаги для cl/clang-cl.
+  CL: /DWIN32_LEAN_AND_MEAN
   GFXSTREAM_REPO: https://github.com/google/gfxstream
   GFXSTREAM_COMMIT: e8377d0096fc9bb75d1fa28e7801a3daed4604f4
 
