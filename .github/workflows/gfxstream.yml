@@ -38,7 +38,8 @@ jobs:
       - name: Конфигурация (CMake, ClangCL)
         shell: pwsh
         run: |
-          cmake -S gfxstream -B build -G "Visual Studio 17 2022" -A x64 -T ClangCL `
+          # Генератор не указываем: CMake выберет установленную на раннере Visual Studio.
+          cmake -S gfxstream -B build -A x64 -T ClangCL `
             -DBUILD_STANDALONE=ON -DENABLE_VKCEREAL_TESTS=OFF
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
