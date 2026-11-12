@@ -216,7 +216,9 @@ fn run_vm(cfg: &VmConfig, mut devices: VmDevices, vm: &VmArgs, console: ConsoleK
         .map(DisplaySpec::parse)
         .transpose()
         .map_err(anyhow::Error::msg)?;
-    let screen = display.map(|d| display::attach(&mut devices, d));
+    let screen = display
+        .map(|d| display::attach(&mut devices, d, vm.gpu))
+        .transpose()?;
 
     let machine = Vm::new(cfg, devices, Box::new(out)).context("не удалось создать ВМ")?;
     tracing::info!(cmdline = machine.cmdline(), "командная строка ядра");
@@ -355,8 +357,9 @@ pub(crate) fn boot_android(args: &AndroidArgs) -> Result<()> {
     let mut bootconfig =
         rustdroid_bootconfig(&vendor_img.bootconfig, "pci0000:00/0000:00:01.0", "hvc0");
     if let Some(spec) = args.vm.display.as_deref() {
-        // Программный рендер в госте (SwiftShader/ANGLE) и композитор через DRM virtio-gpu.
-        for (k, v) in display::GUEST_SWIFTSHADER {
+        // Графика гостя: программный рендер (SwiftShader/ANGLE) или gfxstream (ANGLE поверх
+        // Vulkan хоста); композитор — через DRM virtio-gpu.
+        for (k, v) in display::guest_bootconfig(args.vm.gpu) {
             bootconfig.set(k, v);
         }
         // Частота vsync композитора ranchu — частота дисплея гостя.

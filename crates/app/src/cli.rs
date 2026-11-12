@@ -30,6 +30,15 @@ pub(crate) enum Command {
     GpuProbe,
 }
 
+/// Графика гостя.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub(crate) enum GpuMode {
+    /// Программный рендер в госте, virtio-gpu 2D.
+    Software,
+    /// 3D на видеокарте хоста: gfxstream, в госте ANGLE поверх Vulkan.
+    Gfxstream,
+}
+
 /// Куда направлять ввод с клавиатуры.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub(crate) enum ConsoleKind {
@@ -74,6 +83,11 @@ pub(crate) struct VmArgs {
     /// Окно с экраном гостя: virtio-gpu + virtio-input, `ШИРИНАxВЫСОТА@ГЦ` (например 1920x1080@120).
     #[arg(long)]
     pub display: Option<String>,
+
+    /// Графика гостя в окне: `software` — программный рендер в госте (SwiftShader), `gfxstream`
+    /// — 3D на видеокарте хоста через gfxstream (нужна gfxstream_backend.dll и Vulkan).
+    #[arg(long, value_enum, default_value_t = GpuMode::Software)]
+    pub gpu: GpuMode,
 
     /// Выводить без VSync (tearing; для VRR/G-Sync/FreeSync).
     #[arg(long)]

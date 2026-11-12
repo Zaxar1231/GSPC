@@ -28,6 +28,10 @@
 .PARAMETER FromSource
     Собрать из исходников вместо готового rustdroid.exe.
 
+.PARAMETER Gpu
+    Графика этапа 3: auto (по умолчанию: gfxstream, если проверка 3D прошла, иначе software),
+    gfxstream или software.
+
 .PARAMETER CheckOnly
     Только проверка системы и 3D (Vulkan, gfxstream) — без образов и запуска Android, ~1 мин.
 #>
@@ -47,6 +51,8 @@ param(
     [switch]$SkipBuild,
     [switch]$FromSource,
     [switch]$CheckOnly,
+    [ValidateSet('auto', 'gfxstream', 'software')]
+    [string]$Gpu = 'auto',
     [switch]$Yes
 )
 
@@ -60,6 +66,7 @@ try {
 
 $RepoUrl = 'https://github.com/Zaxar1231/GSPC.git'
 if ($CheckOnly) { $Stages = @() }
+$script:GfxstreamOk = $false
 $Stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
 $Desktop = [Environment]::GetFolderPath('Desktop')
 if (-not $Desktop) { $Desktop = $HOME }
@@ -411,6 +418,7 @@ if (Test-Path $Exe) {
     $rc = Run-Logged $Exe @('-v', 'check') $checkLog
     if ($rc -eq 0) { Ok 'rustdroid check: система готова' } else { Fail "rustdroid check: код $rc (check.log)" }
     # Итог по 3D — отдельными строками в summary.txt.
+    $script:GfxstreamOk = [bool](Select-String -Path $checkLog -Pattern 'gfxstream: инициализирован' -SimpleMatch -Quiet)
     foreach ($m in Select-String -Path $checkLog -Pattern '\[( OK |WARN)\] (.*)$') {
         $text = $m.Matches[0].Groups[2].Value -replace "$([char]27)\[[0-9;]*m", ''
         if ($text -notmatch '^(Vulkan|gfxstream|проверка 3D)') { continue }
@@ -531,7 +539,11 @@ if ($Stages -contains 2 -and $images -and (Test-Path $Exe)) {
 # ------------------------------------------------------------ этап 3 ---
 
 if ($Stages -contains 3 -and $images -and (Test-Path $Exe)) {
-    Step "Этап 3: Android в окне ($Display, до $Stage3Seconds с)"
+    $gpuMode = $Gpu
+    if ($gpuMode -eq 'auto') {
+        $gpuMode = if ($script:GfxstreamOk) { 'gfxstream' } else { 'software' }
+    }
+    Step "Этап 3: Android в окне ($Display, графика $gpuMode, до $Stage3Seconds с)"
     Say '  Сейчас откроется окно RustDroid. Первая загрузка с программным рендером занимает' 'Yellow'
     Say '  несколько минут. Когда появится экран Android:' 'Yellow'
     Say '    1) тапните левой кнопкой мыши по значку или кнопке;' 'Yellow'
@@ -567,8 +579,10 @@ if ($Stages -contains 3 -and $images -and (Test-Path $Exe)) {
     }
     $rc = Run-Vm 'stage3' @('boot-android', '--images', $images, '--instance', 'hwtest',
         '--memory', "$Memory", '--cpus', "$Cpus", '--display', $Display, '--timeout', "$Stage3Seconds",
-        '--serial-log', $serial, '--logcat', (Join-Path $Out 'stage3-logcat.txt'), '-v') $Stage3Seconds $snap
+        '--gpu', $gpuMode, '--serial-log', $serial, '--logcat', (Join-Path $Out 'stage3-logcat.txt'), '-v') $Stage3Seconds $snap
     Say "  код выхода: $rc"
+    "stage3 gpu: $gpuMode" | Add-Content -Path (Join-Path $Out 'system.txt') -Encoding UTF8
+    Ok "stage3: графика $gpuMode"
     Report-Android 'stage3' $serial
 
     $frames = Select-String -Path (Join-Path $Out 'stage3-stderr.log'), (Join-Path $Out 'stage3-stdout.log') `

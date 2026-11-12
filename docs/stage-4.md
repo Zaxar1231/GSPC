@@ -26,8 +26,8 @@ D3D11 ([ADR 0009](adr/0009-weak-gpu-support.md)).
 | 4.1 | Сборка gfxstream (хостовая часть) под Windows в GitHub Actions, публикация DLL | DLL собирается в CI | ✅ |
 | 4.2 | `rustdroid-gfxstream`: загрузка DLL, безопасная обёртка над C API `stream_renderer_*` | тесты обёртки, `rustdroid check` видит DLL | 🚧 |
 | 4.3 | virtio-gpu 3D: `CONTEXT_INIT`, capsets, контексты, `SUBMIT_3D`, blob-ресурсы, фенсы по контекстам | unit-тесты протокола | ✅ |
-| 4.3b | Общая память (shm-область PCI) для `RESOURCE_MAP_BLOB`: host-visible blob-ресурсы, нужные Vulkan гостя | unit-тесты, отображение в WHPX | ⏳ |
-| 4.4 | Параметры гостя для gfxstream (`gpu_mode=gfxstream` у Cuttlefish), выбор уровня графики | загрузочная анимация через GPU | ⏳ |
+| 4.3b | Общая память (shm-область PCI) для `RESOURCE_MAP_BLOB`: host-visible blob-ресурсы, нужные Vulkan гостя | unit-тесты, отображение в WHPX | ✅ (железо — в 4.4) |
+| 4.4 | Параметры гостя для gfxstream (`gpu_mode=gfxstream` у Cuttlefish), выбор уровня графики | загрузочная анимация через GPU | 🚧 подключено, ждёт проверки на железе |
 | 4.5 | Zero-copy: Vulkan-образ gfxstream → NT handle → `OpenSharedHandle` в D3D12 | нет копии кадра через CPU | ⏳ |
 | 4.6 | Уровень 2: gfxstream поверх ANGLE-on-D3D11 для GPU без Vulkan | i3-3220 рисует на видеокарте | ⏳ |
 | 4.7 | Шейдерный проход композитора: letterbox (сохранение пропорций), масштабирование | пропорции при любом размере окна | ⏳ |
@@ -64,6 +64,26 @@ D3D11 ([ADR 0009](adr/0009-weak-gpu-support.md)).
 копируется через CPU (до 4.5); в эмуляторе устройство с бэкендом ещё не включается (4.4).
 Проверка — 10 unit-тестов протокола на заглушке бэкенда; на реальном gfxstream проверится на
 железе в 4.4.
+
+**4.3b.** Область общей памяти virtio-gpu — 64-битный prefetchable BAR2 (4 ГиБ) с capability
+`VIRTIO_PCI_CAP_SHARED_MEMORY_CFG` (`shmid` 1, host-visible). BAR лежит в окне 32–40 ГиБ:
+ниже 64 ГиБ, потому что у старых CPU (i3-3220) физический адрес 36-битный; окно объявлено в
+`_CRS` корневого моста ACPI (`QWordMemory`), иначе ядро не примет BAR. RAM гостя ограничена,
+чтобы не заходить в окно (до 29 ГиБ).
+
+`RESOURCE_MAP_BLOB`: бэкенд отображает blob на хосте (`stream_renderer_resource_map`; память
+выделяет gfxstream с выравниванием на страницу — функция `VulkanAllocateHostMemory`), устройство
+проверяет выравнивание, границы и пересечения и отображает её в BAR2 через `WHvMapGpaRange`.
+`map_info` (кэшируемость) передаётся гостю как есть. Отображения снимаются при `UNMAP_BLOB`,
+`RESOURCE_UNREF`, сбросе устройства и до удаления бэкенда.
+
+**4.4.** `boot-android --display … --gpu gfxstream`: gfxstream запускается на Vulkan без окна
+(`USE_VK | USE_SURFACELESS`), virtio-gpu получает 3D-бэкенд и общую память, фенсы будят worker
+устройства. Параметры гостя — как `gpu_mode=gfxstream_guest_angle` у Cuttlefish: ANGLE поверх
+Vulkan, Vulkan — драйвер gfxstream `ranchu`, клиентская композиция, кадр через DRM virtio-gpu
+(на хосте пока читается через CPU). Если gfxstream не запустился, `boot-android` завершается с
+ошибкой: параметры гостя уже выбраны под gfxstream. По умолчанию `--gpu software` (этап 3).
+`hw-test.ps1 -Gpu auto` берёт gfxstream, если его прошла проверка 3D.
 
 ## Проверки на железе
 

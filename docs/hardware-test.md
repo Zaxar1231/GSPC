@@ -60,6 +60,7 @@ powershell -ExecutionPolicy Bypass -File scripts\hw-test.ps1 -FromSource -SkipBu
 | `-Stages` | `3` | какие этапы проверять (этап 1 — только с `-FromSource`) |
 | `-FromSource` | — | собрать из исходников вместо готовой сборки |
 | `-CheckOnly` | — | только проверка системы и 3D, без образов и Android |
+| `-Gpu` | `auto` | графика этапа 3: `auto` — gfxstream, если его прошла проверка 3D, иначе `software`; `gfxstream`; `software` |
 | `-Memory` / `-Cpus` | `4096` / `4` | RAM (МиБ) и vCPU гостя Android |
 | `-Display` | `1280x720@60` | окно этапа 3 |
 | `-Stage2Seconds` / `-Stage3Seconds` | `300` / `600` | сколько работает ВМ |

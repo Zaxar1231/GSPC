@@ -18,6 +18,12 @@
   гостю только после выполнения фенса (по кольцам контекстов и глобальной шкале). Исполнитель —
   трейт `Backend3d`; реализация на gfxstream (`rustdroid_gpu::gfxstream`, Windows).
   В эмулятор пока не подключено (задача 4.4).
+- Общая память virtio-gpu (задача 4.3b): 64-битный BAR2 с capability shared memory в окне
+  32–40 ГиБ (`QWordMemory` в `_CRS`), `RESOURCE_MAP_BLOB`/`UNMAP_BLOB` через
+  `WHvMapGpaRange` — host-visible blob-ресурсы для Vulkan гостя.
+- `boot-android --gpu gfxstream` (задача 4.4): virtio-gpu с 3D на gfxstream и параметры гостя
+  как `gfxstream_guest_angle` у Cuttlefish. По умолчанию `--gpu software`. `hw-test.ps1 -Gpu`
+  (`auto` — gfxstream, если его прошла проверка 3D).
 - `rustdroid check` проверяет 3D: видеокарты и версию Vulkan (через `vulkan-1.dll`) и запуск
   gfxstream на Vulkan. Проверка идёт в дочернем процессе `rustdroid gpu-probe`, чтобы падение
   драйвера не роняло `check`; отсутствие 3D — предупреждение, а не ошибка. Если проверка

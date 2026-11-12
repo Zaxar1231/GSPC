@@ -11,14 +11,16 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use anyhow::{Context, Result};
 use rustdroid_devices::input::key_events;
 use rustdroid_devices::{InputKind, TouchState};
-use rustdroid_gpu::{DisplayMode, Mailbox};
+use rustdroid_gfxstream::{Config as GfxConfig, ffi::flags as gfx_flags};
+use rustdroid_gpu::gfxstream::GfxstreamBackend;
+use rustdroid_gpu::{DisplayMode, FenceSink, Mailbox};
 use rustdroid_input::keys::linux_keycode;
 use rustdroid_present::d3d12::PresentMode;
 use rustdroid_present::run::PresentConfig;
 use rustdroid_present::window::{self, WindowEvent};
 use rustdroid_vmm::{ExitStats, RunOutcome, Vm, VmDevices};
 
-use crate::cli::{DisplaySpec, VmArgs};
+use crate::cli::{DisplaySpec, GpuMode, VmArgs};
 
 /// Параметры bootconfig для программного рендера в госте (как `gpu_mode=guest_swiftshader`
 /// у Cuttlefish): gralloc minigbm, hwcomposer ranchu через DRM virtio-gpu, ANGLE/SwiftShader.
@@ -36,6 +38,35 @@ pub(crate) const GUEST_SWIFTSHADER: &[(&str, &str)] = &[
     ("androidboot.lcd_density", "240"),
 ];
 
+/// Параметры bootconfig для 3D через gfxstream (как `gpu_mode=gfxstream_guest_angle` у
+/// Cuttlefish): GLES в госте — ANGLE поверх Vulkan, Vulkan — драйвер gfxstream (`ranchu`),
+/// команды идут в virtio-gpu; композиция — клиентская (SurfaceFlinger через ANGLE), кадр — через
+/// DRM virtio-gpu.
+pub(crate) const GFXSTREAM_GUEST_ANGLE: &[(&str, &str)] = &[
+    ("androidboot.hardware.gralloc", "minigbm"),
+    ("androidboot.hardware.hwcomposer", "ranchu"),
+    ("androidboot.hardware.hwcomposer.mode", "client"),
+    ("androidboot.hardware.hwcomposer.display_finder_mode", "drm"),
+    (
+        "androidboot.hardware.hwcomposer.display_framebuffer_format",
+        "rgba",
+    ),
+    ("androidboot.hardware.egl", "angle"),
+    ("androidboot.hardware.vulkan", "ranchu"),
+    ("androidboot.hardware.gltransport", "virtio-gpu-asg"),
+    ("androidboot.opengles.version", "196609"),
+    ("androidboot.cpuvulkan.version", "0"),
+    ("androidboot.lcd_density", "240"),
+];
+
+/// Параметры bootconfig гостя для выбранной графики.
+pub(crate) fn guest_bootconfig(gpu: GpuMode) -> &'static [(&'static str, &'static str)] {
+    match gpu {
+        GpuMode::Software => GUEST_SWIFTSHADER,
+        GpuMode::Gfxstream => GFXSTREAM_GUEST_ANGLE,
+    }
+}
+
 /// Экран, подключённый к ВМ.
 #[derive(Debug)]
 pub(crate) struct Screen {
@@ -44,7 +75,11 @@ pub(crate) struct Screen {
 }
 
 /// Добавляет virtio-gpu, сенсорный экран и клавиатуру.
-pub(crate) fn attach(devices: &mut VmDevices, spec: DisplaySpec) -> Screen {
+///
+/// # Errors
+/// С `--gpu gfxstream`: нет DLL или gfxstream не запустился. Запасного пути нет намеренно:
+/// параметры гостя уже выбраны под gfxstream, и программный рендер с ними не заработает.
+pub(crate) fn attach(devices: &mut VmDevices, spec: DisplaySpec, gpu: GpuMode) -> Result<Screen> {
     let mailbox = Mailbox::new();
     let mode = DisplayMode {
         width: spec.width,
@@ -52,6 +87,27 @@ pub(crate) fn attach(devices: &mut VmDevices, spec: DisplaySpec) -> Screen {
         refresh_hz: spec.refresh_hz,
     };
     devices.gpu = Some((mode, Arc::clone(&mailbox)));
+    if gpu == GpuMode::Gfxstream {
+        let path = crate::gpu_probe::library_path()
+            .context("не удалось определить каталог rustdroid.exe")?;
+        let fences = FenceSink::new();
+        let backend = GfxstreamBackend::new(
+            &path,
+            GfxConfig {
+                flags: gfx_flags::USE_VK | gfx_flags::USE_SURFACELESS,
+                width: spec.width,
+                height: spec.height,
+            },
+            Arc::clone(&fences),
+        )
+        .with_context(|| {
+            format!(
+                "gfxstream не запустился ({}). Проверьте `rustdroid check` или запустите с --gpu software",
+                path.display()
+            )
+        })?;
+        devices.gpu_3d = Some((Box::new(backend), fences));
+    }
     devices.inputs.push((
         InputKind::Touchscreen {
             width: spec.width,
@@ -70,9 +126,10 @@ pub(crate) fn attach(devices: &mut VmDevices, spec: DisplaySpec) -> Screen {
         width = spec.width,
         height = spec.height,
         hz = spec.refresh_hz,
+        ?gpu,
         "дисплей гостя"
     );
-    Screen { spec, mailbox }
+    Ok(Screen { spec, mailbox })
 }
 
 #[allow(
