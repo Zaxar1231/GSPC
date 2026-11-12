@@ -4,7 +4,8 @@
 //! HWND), поэтому UI никогда не блокирует вывод кадра. События ввода отдаются обработчику
 //! сразу из оконной процедуры, без ожидания кадра.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{BLACK_BRUSH, GetStockObject, HBRUSH};
@@ -26,7 +27,8 @@ use windows::core::{PCWSTR, w};
 /// Событие окна.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum WindowEvent {
-    /// Указатель (левая кнопка мыши): координаты в долях клиентской области 0..1.
+    /// Указатель (левая кнопка мыши): координаты в долях экрана гостя 0..1 (с учётом чёрных
+    /// полей, если пропорции окна и экрана гостя не совпадают).
     Pointer {
         /// X.
         x: f32,
@@ -48,6 +50,10 @@ pub enum WindowEvent {
     Close,
 }
 
+/// Композитор выводит кадр с полями (letterbox); `false` — кадр растянут на всё окно
+/// (запасной путь без шейдеров). Ставит композитор, читает оконная процедура.
+pub(crate) static LETTERBOX: AtomicBool = AtomicBool::new(false);
+
 /// Дескриптор окна, который можно передать в другой поток (композитору).
 #[derive(Debug, Clone, Copy)]
 pub struct WindowHandle(pub HWND);
@@ -68,6 +74,8 @@ type Handler = Box<dyn FnMut(WindowEvent)>;
 
 thread_local! {
     static HANDLER: RefCell<Option<Handler>> = const { RefCell::new(None) };
+    /// Размер экрана гостя: по нему считаются поля (letterbox) для касаний.
+    static GUEST_SIZE: Cell<(u32, u32)> = const { Cell::new((0, 0)) };
 }
 
 fn emit(e: WindowEvent) {
@@ -101,16 +109,23 @@ fn client_point(hwnd: HWND, lparam: LPARAM) -> (f32, f32) {
     let mut r = RECT::default();
     // SAFETY: окно валидно, выходная структура локальная.
     let _ = unsafe { GetClientRect(hwnd, &raw mut r) };
-    #[allow(clippy::cast_precision_loss, reason = "пиксели окна")]
+    #[allow(
+        clippy::cast_sign_loss,
+        reason = "размеры клиентской области неотрицательны"
+    )]
     let (w, h) = (
-        ((r.right - r.left).max(1)) as f32,
-        ((r.bottom - r.top).max(1)) as f32,
+        (r.right - r.left).max(1) as u32,
+        (r.bottom - r.top).max(1) as u32,
     );
+    let (gw, gh) = GUEST_SIZE.with(Cell::get);
+    // Без размера гостя или без шейдерного прохода кадр растянут на всё окно.
+    let rect = if gw == 0 || gh == 0 || !LETTERBOX.load(Ordering::Relaxed) {
+        crate::layout::fit(w, h, w, h)
+    } else {
+        crate::layout::fit(gw, gh, w, h)
+    };
     #[allow(clippy::cast_precision_loss, reason = "пиксели окна")]
-    (
-        (x as f32 / w).clamp(0.0, 1.0),
-        (y as f32 / h).clamp(0.0, 1.0),
-    )
+    crate::layout::to_frame(rect, x as f32, y as f32)
 }
 
 extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
@@ -243,6 +258,7 @@ pub fn create(
     // SAFETY: структура локальная.
     unsafe { AdjustWindowRectEx(&raw mut rect, WS_OVERLAPPEDWINDOW, false, WS_EX_APPWINDOW) }?;
     HANDLER.with(|h| *h.borrow_mut() = Some(Box::new(handler)));
+    GUEST_SIZE.with(|g| g.set((width, height)));
     let title: Vec<u16> = title.encode_utf16().chain(std::iter::once(0)).collect();
     // SAFETY: класс зарегистрирован, строки живут до конца вызова.
     let hwnd = unsafe {

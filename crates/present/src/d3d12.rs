@@ -2,8 +2,10 @@
 //!
 //! - flip-model swapchain (`FLIP_DISCARD`), 2 буфера, waitable object, `SetMaximumFrameLatency(1)`;
 //! - без VSync — `DXGI_PRESENT_ALLOW_TEARING` (нужно для VRR/G-Sync/FreeSync в окне);
-//! - копия кадра в back buffer через `CopyTextureRegion` из persistently-mapped upload-буфера
-//!   (по одному на кадр в полёте), шейдеров нет: масштабирует DXGI (`DXGI_SCALING_STRETCH`);
+//! - кадр копируется из persistently-mapped upload-буфера (по одному на кадр в полёте) в
+//!   текстуру и рисуется шейдерным проходом (модуль `blit`) в back buffer размера окна с
+//!   сохранением пропорций; если шейдеры недоступны — копия прямо в back buffer размера кадра,
+//!   растягивает DXGI (`DXGI_SCALING_STRETCH`);
 //! - адаптер — самый производительный с D3D12 (`DXGI_GPU_PREFERENCE_HIGH_PERFORMANCE`); если
 //!   D3D12 нет ни у одного — WARP (программный D3D12 из Windows).
 //!
@@ -12,6 +14,8 @@
 use std::mem::ManuallyDrop;
 
 use rustdroid_gpu::{Frame, PixelFormat};
+
+use crate::blit::{Blit, Pass, TARGET_FORMAT};
 use rustdroid_telemetry::overlay::{self, Canvas, OverlayData};
 use windows::Win32::Foundation::{CloseHandle, HANDLE, HWND, WAIT_OBJECT_0};
 use windows::Win32::Graphics::Direct3D::D3D_FEATURE_LEVEL_11_0;
@@ -45,7 +49,7 @@ use windows::Win32::System::Threading::{CreateEventW, INFINITE, WaitForSingleObj
 use windows::core::{BOOL, Interface};
 
 /// Число back buffer'ов и кадров в полёте.
-const BUFFERS: usize = 2;
+pub(crate) const BUFFERS: usize = 2;
 
 /// Режим вывода.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -72,9 +76,9 @@ pub enum PresentError {
     BadFrame(u32, u32),
 }
 
-type Result<T> = std::result::Result<T, PresentError>;
+pub(crate) type Result<T> = std::result::Result<T, PresentError>;
 
-trait Ctx<T> {
+pub(crate) trait Ctx<T> {
     fn ctx(self, what: &'static str) -> Result<T>;
 }
 
@@ -106,6 +110,9 @@ pub struct Presenter {
     tearing: bool,
     adapter: String,
     scratch: Vec<u8>,
+    /// Шейдерный проход (letterbox); `None` — копия кадра без шейдеров, растяжение DXGI.
+    blit: Option<Blit>,
+    hwnd: HWND,
     device: ID3D12Device,
 }
 
@@ -133,7 +140,7 @@ fn swap_flags(tearing: bool) -> DXGI_SWAP_CHAIN_FLAG {
     f
 }
 
-fn transition(
+pub(crate) fn transition(
     resource: &ID3D12Resource,
     before: D3D12_RESOURCE_STATES,
     after: D3D12_RESOURCE_STATES,
@@ -158,7 +165,7 @@ fn transition(
 ///
 /// # Safety
 /// Результат нельзя удалять (он в `ManuallyDrop`) и нельзя использовать дольше `resource`.
-unsafe fn borrow(resource: &ID3D12Resource) -> ManuallyDrop<Option<ID3D12Resource>> {
+pub(crate) unsafe fn borrow(resource: &ID3D12Resource) -> ManuallyDrop<Option<ID3D12Resource>> {
     // SAFETY: побитовая копия указателя интерфейса; счётчик ссылок не меняется, а
     // ManuallyDrop гарантирует, что Release не будет вызван.
     unsafe { std::mem::transmute_copy(resource) }
@@ -292,7 +299,15 @@ impl Presenter {
         // SAFETY: безымянное событие.
         let fence_event = unsafe { CreateEventW(None, false, false, None) }.ctx("CreateEventW")?;
 
-        tracing::info!(adapter = %adapter_name, tearing, "D3D12-композитор создан");
+        let blit = match Blit::new(&device) {
+            Ok(b) => Some(b),
+            Err(e) => {
+                tracing::warn!(error = %e, "шейдерный проход недоступен: кадр будет растянут на окно");
+                None
+            }
+        };
+        crate::window::LETTERBOX.store(blit.is_some(), std::sync::atomic::Ordering::Relaxed);
+        tracing::info!(adapter = %adapter_name, tearing, letterbox = blit.is_some(), "D3D12-композитор создан");
         Ok(Self {
             queue,
             swapchain,
@@ -308,6 +323,8 @@ impl Presenter {
             tearing,
             adapter: adapter_name,
             scratch: Vec::new(),
+            blit,
+            hwnd,
             device,
         })
     }
@@ -351,6 +368,17 @@ impl Presenter {
         r == WAIT_OBJECT_0
     }
 
+    /// Размер клиентской области окна; `None`, если окно свёрнуто или недоступно.
+    fn client_size(&self) -> Option<(u32, u32)> {
+        let mut r = windows::Win32::Foundation::RECT::default();
+        // SAFETY: окно валидно (живёт дольше композитора), структура локальная.
+        unsafe { windows::Win32::UI::WindowsAndMessaging::GetClientRect(self.hwnd, &raw mut r) }
+            .ok()?;
+        let w = u32::try_from(r.right - r.left).ok()?;
+        let h = u32::try_from(r.bottom - r.top).ok()?;
+        (w > 0 && h > 0).then_some((w, h))
+    }
+
     fn ensure_size(&mut self, w: u32, h: u32, format: DXGI_FORMAT) -> Result<()> {
         if self.size == (w, h, format) {
             return Ok(());
@@ -363,7 +391,7 @@ impl Presenter {
         }
         .ctx("ResizeBuffers")?;
         self.size = (w, h, format);
-        tracing::info!(w, h, "размер swapchain изменён");
+        tracing::debug!(w, h, "размер swapchain изменён");
         Ok(())
     }
 
@@ -437,7 +465,30 @@ impl Presenter {
             return Err(PresentError::BadFrame(w, h));
         }
         let format = dxgi_format(frame.format);
-        self.ensure_size(w, h, format)?;
+        // С шейдерным проходом back buffer — размера окна, без него — размера кадра (растягивает DXGI).
+        let target = if self.blit.is_some() {
+            match self.client_size() {
+                Some(size) => size,
+                // Окно свёрнуто: выводить некуда.
+                None => return Ok(()),
+            }
+        } else {
+            (w, h)
+        };
+        let target_format = if self.blit.is_some() {
+            TARGET_FORMAT
+        } else {
+            format
+        };
+        self.ensure_size(target.0, target.1, target_format)?;
+        if let Some(blit) = &self.blit
+            && blit.needs_texture(w, h, format)
+        {
+            self.wait_idle()?;
+            if let Some(blit) = self.blit.as_mut() {
+                blit.create_texture(&self.device, w, h, format)?;
+            }
+        }
 
         // SAFETY: swapchain валиден.
         let index = unsafe { self.swapchain.GetCurrentBackBufferIndex() } as usize % BUFFERS;
@@ -497,25 +548,37 @@ impl Presenter {
                 },
             },
         };
-        let to_copy = [transition(
-            &back,
-            D3D12_RESOURCE_STATE_PRESENT,
-            D3D12_RESOURCE_STATE_COPY_DEST,
-        )];
-        let to_present = [transition(
-            &back,
-            D3D12_RESOURCE_STATE_COPY_DEST,
-            D3D12_RESOURCE_STATE_PRESENT,
-        )];
-        // SAFETY: список в записывающем состоянии, барьер ссылается на живой back buffer.
-        unsafe { self.list.ResourceBarrier(&to_copy) };
-        // SAFETY: описания копирования локальные, ресурсы живы до конца функции.
-        unsafe {
-            self.list
-                .CopyTextureRegion(&raw const dst, 0, 0, 0, &raw const src, None)
-        };
-        // SAFETY: как для первого барьера.
-        unsafe { self.list.ResourceBarrier(&to_present) };
+        if let Some(blit) = self.blit.as_mut() {
+            let viewport = crate::layout::fit(w, h, target.0, target.1);
+            let pass = Pass {
+                src: &src,
+                back: &back,
+                index,
+                viewport,
+                target,
+            };
+            blit.record(&self.device, &self.list, &pass)?;
+        } else {
+            let to_copy = [transition(
+                &back,
+                D3D12_RESOURCE_STATE_PRESENT,
+                D3D12_RESOURCE_STATE_COPY_DEST,
+            )];
+            let to_present = [transition(
+                &back,
+                D3D12_RESOURCE_STATE_COPY_DEST,
+                D3D12_RESOURCE_STATE_PRESENT,
+            )];
+            // SAFETY: список в записывающем состоянии, барьер ссылается на живой back buffer.
+            unsafe { self.list.ResourceBarrier(&to_copy) };
+            // SAFETY: описания копирования локальные, ресурсы живы до конца функции.
+            unsafe {
+                self.list
+                    .CopyTextureRegion(&raw const dst, 0, 0, 0, &raw const src, None)
+            };
+            // SAFETY: как для первого барьера.
+            unsafe { self.list.ResourceBarrier(&to_present) };
+        }
         // SAFETY: запись команд завершена.
         unsafe { self.list.Close() }.ctx("Close")?;
         let lists = [Some(
