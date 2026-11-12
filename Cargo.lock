@@ -505,7 +505,9 @@ dependencies = [
 name = "rustdroid-gpu"
 version = "0.0.1"
 dependencies = [
+ "rustdroid-gfxstream",
  "rustdroid-virtio",
+ "thiserror",
  "tracing",
 ]
 

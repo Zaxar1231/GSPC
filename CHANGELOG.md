@@ -8,6 +8,17 @@
 
 ## [Unreleased]
 
+### Added
+
+- `gfxstream_backend.dll` собирается в GitHub Actions из зафиксированного коммита
+  `google/gfxstream` (ClangCL, патчи в `third_party/gfxstream-patches`) и публикуется в
+  pre-release `deps-gfxstream`.
+- virtio-gpu 3D (задача 4.3): capsets, контексты с `CONTEXT_INIT`, `RESOURCE_CREATE_3D`,
+  передачи 3D, `SUBMIT_3D`, blob-ресурсы и `SET_SCANOUT_BLOB`. Команды с фенсом возвращаются
+  гостю только после выполнения фенса (по кольцам контекстов и глобальной шкале). Исполнитель —
+  трейт `Backend3d`; реализация на gfxstream (`rustdroid_gpu::gfxstream`, Windows).
+  В эмулятор пока не подключено (задача 4.4).
+
 ### Changed
 
 - Этап 4 начат ([docs/stage-4.md](docs/stage-4.md)).
