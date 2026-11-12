@@ -34,9 +34,9 @@ powershell -ExecutionPolicy Bypass -File $env:TEMP\hw-test.ps1
 ## Параметры
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File scripts\hw-test.ps1 -Stages 1          # только этап 1
+powershell -ExecutionPolicy Bypass -File scripts\hw-test.ps1 -FromSource -Stages 1,2,3  # все этапы из исходников
 powershell -ExecutionPolicy Bypass -File scripts\hw-test.ps1 -Display 1920x1080@120 -Cpus 6
-powershell -ExecutionPolicy Bypass -File scripts\hw-test.ps1 -SkipBuild         # без пересборки
+powershell -ExecutionPolicy Bypass -File scripts\hw-test.ps1 -FromSource -SkipBuild   # из исходников без пересборки
 ```
 
 | Параметр | По умолчанию | |
