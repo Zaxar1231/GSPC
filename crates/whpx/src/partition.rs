@@ -170,14 +170,21 @@ impl Partition {
             &WHvX64LocalApicEmulationModeXApic,
             "SetPartitionProperty(LocalApicEmulationMode)",
         )?;
-        if config.intercept_invalid_opcode {
-            // WHV_EXTENDED_VM_EXITS: бит 2 — ExceptionExit.
-            let exits = WHV_EXTENDED_VM_EXITS { AsUINT64: 1 << 2 };
+        // WHV_EXTENDED_VM_EXITS: бит 0 — X64CpuidExit (выходы по листам из CpuidExitList),
+        // бит 2 — ExceptionExit (выходы по исключениям из ExceptionExitBitmap).
+        let exit_bits = u64::from(!config.cpuid_exits.is_empty())
+            | (u64::from(config.intercept_invalid_opcode) << 2);
+        if exit_bits != 0 {
+            let exits = WHV_EXTENDED_VM_EXITS {
+                AsUINT64: exit_bits,
+            };
             partition.set_property(
                 WHvPartitionPropertyCodeExtendedVmExits,
                 &exits,
                 "SetPartitionProperty(ExtendedVmExits)",
             )?;
+        }
+        if config.intercept_invalid_opcode {
             // Бит вектора #UD (6).
             let bitmap: u64 = 1 << 6;
             partition.set_property(

@@ -10,6 +10,12 @@
 
 ### Fixed
 
+- KeyMint падал с SIGILL в `_aesni_ctr32_6x` на CPU с AVX, но без AES-NI (i3-3220): BoringSSL
+  видел AVX и выбирал AES-GCM на VEX-инструкциях (`VAESENC`); system_server после этого падал
+  с `Failed to encrypt blob`. На таких CPU AVX (и FMA, F16C, AVX2, AVX-512, VAES, VPCLMULQDQ)
+  скрыт от гостя через выходы CPUID, и BoringSSL берёт путь на обычных AES-NI, которые VMM
+  выполняет сам. В `ExtendedVmExits` включён бит `X64CpuidExit`, без которого список листов
+  CPUID не действует. Счётчик `emulated_aes` в статистике выходов.
 - `libcrypto` (BoringSSL) падал на CPU без AES-NI (Core i3 Sandy/Ivy Bridge и др.): он
   собран с `-maes` и не проверяет CPUID. VMM выполняет `AESENC`, `AESENCLAST`, `AESDEC`,
   `AESDECLAST`, `AESIMC`, `AESKEYGENASSIST` и `PCLMULQDQ` программно (проверено по FIPS-197).

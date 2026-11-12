@@ -297,6 +297,72 @@ pub fn decode_movbe(bytes: &[u8]) -> Option<Movbe> {
     }
 }
 
+/// Какие возможности CPU скрыть от гостя в CPUID.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct CpuidPolicy {
+    /// Скрыть AVX и всё, что на нём построено (FMA, F16C, AVX2, AVX-512, VAES, VPCLMULQDQ).
+    ///
+    /// Нужно на CPU с AVX, но без AES-NI (Core i3/Pentium Sandy/Ivy Bridge): BoringSSL видит
+    /// AVX и выбирает AES-GCM на VEX-инструкциях (`VAESENC`), которые VMM не эмулирует. Без
+    /// AVX он берёт путь на обычных `AESENC`/`PCLMULQDQ`, а их VMM выполняет сам.
+    pub hide_avx: bool,
+}
+
+impl CpuidPolicy {
+    /// Политика для CPU хоста: `host_aes` — есть ли у него AES-NI.
+    #[must_use]
+    pub fn for_host(host_aes: bool) -> Self {
+        Self {
+            hide_avx: !host_aes,
+        }
+    }
+
+    /// Листы CPUID, на которых нужен выход в VMM.
+    #[must_use]
+    pub fn exit_leaves(&self) -> Vec<u32> {
+        if self.hide_avx {
+            vec![1, 7]
+        } else {
+            Vec::new()
+        }
+    }
+
+    /// Применяет политику к результату CPUID `[eax, ebx, ecx, edx]`.
+    #[must_use]
+    pub fn apply(&self, leaf: u32, subleaf: u32, mut r: [u32; 4]) -> [u32; 4] {
+        if !self.hide_avx {
+            return r;
+        }
+        match (leaf, subleaf) {
+            // ECX: FMA (12), AVX (28), F16C (29).
+            (1, _) => r[2] &= !((1 << 12) | (1 << 28) | (1 << 29)),
+            // EBX: AVX2 (5), AVX-512 (16, 17, 21, 26–28, 30, 31); ECX: VAES (9),
+            // VPCLMULQDQ (10), AVX512_VBMI и др. (1, 6, 11, 12, 14); EDX: AVX512_4* (2, 3).
+            (7, 0) => {
+                r[1] &= !((1 << 5)
+                    | (1 << 16)
+                    | (1 << 17)
+                    | (1 << 21)
+                    | (1 << 26)
+                    | (1 << 27)
+                    | (1 << 28)
+                    | (1 << 30)
+                    | (1 << 31));
+                r[2] &= !((1 << 1)
+                    | (1 << 6)
+                    | (1 << 9)
+                    | (1 << 10)
+                    | (1 << 11)
+                    | (1 << 12)
+                    | (1 << 14));
+                r[3] &= !((1 << 2) | (1 << 3));
+            }
+            _ => {}
+        }
+        r
+    }
+}
+
 /// Значение регистра после `MOVBE` reg ← mem: 32-битная запись обнуляет старшую половину,
 /// 16-битная сохраняет старшие 48 бит.
 #[must_use]
@@ -416,6 +482,27 @@ mod tests {
         ));
         // Без префикса 66 это не AES-NI.
         assert!(decode(&[0x0F, 0x38, 0xDD, 0xC4]).is_none());
+    }
+
+    #[test]
+    fn cpuid_policy_hides_avx_only_without_aes() {
+        let on_aes = CpuidPolicy::for_host(true);
+        assert!(on_aes.exit_leaves().is_empty());
+        assert_eq!(on_aes.apply(1, 0, [0, 0, u32::MAX, 0]), [0, 0, u32::MAX, 0]);
+
+        let p = CpuidPolicy::for_host(false);
+        assert_eq!(p.exit_leaves(), [1, 7]);
+        let r = p.apply(1, 0, [0, 0, u32::MAX, u32::MAX]);
+        assert_eq!(r[2] & (1 << 28), 0, "AVX скрыт");
+        assert_ne!(r[2] & (1 << 25), 0, "AES-NI не трогаем");
+        assert_ne!(r[2] & (1 << 27), 0, "OSXSAVE остаётся");
+        assert_eq!(r[3], u32::MAX);
+        let r = p.apply(7, 0, [u32::MAX; 4]);
+        assert_eq!(r[1] & (1 << 5), 0, "AVX2 скрыт");
+        assert_ne!(r[1] & (1 << 3), 0, "BMI1 остаётся");
+        // Другие подлисты и листы не меняются.
+        assert_eq!(p.apply(7, 1, [u32::MAX; 4]), [u32::MAX; 4]);
+        assert_eq!(p.apply(0xD, 0, [u32::MAX; 4]), [u32::MAX; 4]);
     }
 
     #[test]

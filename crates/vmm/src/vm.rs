@@ -30,7 +30,9 @@ use crate::aesni;
 use crate::boot_cpu::{BootCpuState, Segment, boot_cpu_state, setup_boot_tables};
 use crate::cmdline::{self, Timing};
 use crate::error::{Error, Result};
-use crate::insn::{Aes, Direction, Insn, Movbe, Operand, decode, load_result, store_bytes};
+use crate::insn::{
+    Aes, CpuidPolicy, Direction, Insn, Movbe, Operand, decode, load_result, store_bytes,
+};
 use crate::ioapic::{ApicMessage, InterruptSink, IoApic};
 use crate::layout::e820_map;
 use crate::loader::{self, BootSpec};
@@ -129,8 +131,10 @@ pub struct ExitStats {
     pub halt: u64,
     /// Прочие.
     pub other: u64,
-    /// `#UD`, которые VMM выполнил сам (`MOVBE` на CPU без неё).
+    /// `#UD`, которые VMM выполнил сам (`MOVBE`, AES-NI на CPU без них).
     pub emulated: u64,
+    /// Из них AES-NI и `PCLMULQDQ`.
+    pub emulated_aes: u64,
     /// `#UD`, возвращённые гостю.
     pub invalid_opcode: u64,
 }
@@ -155,6 +159,7 @@ impl ExitStats {
         self.halt += o.halt;
         self.other += o.other;
         self.emulated += o.emulated;
+        self.emulated_aes += o.emulated_aes;
         self.invalid_opcode += o.invalid_opcode;
     }
 }
@@ -312,6 +317,7 @@ pub struct Vm {
     events: Arc<VmEvents>,
     stop: Arc<AtomicBool>,
     cpus: u32,
+    cpuid: CpuidPolicy,
     boot: BootCpuState,
     cmdline: String,
     ram: Arc<GuestRam>,
@@ -362,9 +368,16 @@ impl Vm {
             "частоты гипервизора"
         );
 
+        let cpuid = CpuidPolicy::for_host(host_has_aes());
+        if cpuid.hide_avx {
+            tracing::warn!(
+                "у CPU нет AES-NI: AES выполняется программно, AVX скрыт от гостя \
+                 (иначе BoringSSL выбирает AES-GCM на VEX-инструкциях)"
+            );
+        }
         let partition = Partition::new(&PartitionConfig {
             processor_count: cfg.cpus,
-            cpuid_exits: Vec::new(),
+            cpuid_exits: cpuid.exit_leaves(),
             // Перехват #UD почти ничего не стоит (нормальный код его не вызывает) и позволяет
             // выполнять MOVBE на CPU без неё.
             intercept_invalid_opcode: true,
@@ -517,6 +530,7 @@ impl Vm {
             events: Arc::new(VmEvents::default()),
             stop: Arc::new(AtomicBool::new(false)),
             cpus: cfg.cpus,
+            cpuid,
             boot: boot_cpu_state(&loaded),
             cmdline,
             ram,
@@ -610,12 +624,12 @@ impl Vm {
                 .map(|mut vcpu| {
                     let mut bus = self.bus();
                     let stopper = stopper.clone();
-                    let (events, stop) = (&self.events, &self.stop);
+                    let (events, stop, cpuid) = (&self.events, &self.stop, self.cpuid);
                     std::thread::Builder::new()
                         .name(format!("vcpu{}", vcpu.index()))
                         .spawn_scoped(scope, move || {
                             let _tuning = crate::host::tune_current_thread("Games");
-                            let r = run_loop(&mut vcpu, &mut bus, events, stop);
+                            let r = run_loop(&mut vcpu, &mut bus, events, stop, cpuid);
                             stopper.stop();
                             r
                         })
@@ -625,7 +639,13 @@ impl Vm {
             if let Some(mut vcpu) = bsp {
                 let _tuning = crate::host::tune_current_thread("Games");
                 let mut bus = self.bus();
-                results.push(run_loop(&mut vcpu, &mut bus, &self.events, &self.stop));
+                results.push(run_loop(
+                    &mut vcpu,
+                    &mut bus,
+                    &self.events,
+                    &self.stop,
+                    self.cpuid,
+                ));
                 stopper.stop();
             }
             for h in handles {
@@ -683,6 +703,7 @@ fn run_loop(
     bus: &mut PlatformBus,
     events: &VmEvents,
     stop: &AtomicBool,
+    cpuid: CpuidPolicy,
 ) -> Result<(RunOutcome, ExitStats)> {
     let mut stats = ExitStats::default();
     loop {
@@ -703,7 +724,7 @@ fn run_loop(
             }
             Exit::Cpuid => {
                 stats.cpuid += 1;
-                vcpu.handle_cpuid(|_, _, default| default)?;
+                vcpu.handle_cpuid(|leaf, sub, default| cpuid.apply(leaf, sub, default))?;
             }
             Exit::Halt => {
                 // При эмуляции LAPIC гипервизором HLT обычно обрабатывается без выхода;
@@ -834,7 +855,11 @@ fn handle_exception(vcpu: &mut Vcpu, bus: &mut PlatformBus, stats: &mut ExitStat
     let ctx = EmuContext::read(vcpu)?;
     let done = match insn {
         Insn::Movbe(m) => emulate_movbe(vcpu, bus, &ctx, &m)?,
-        Insn::Aes(a) => emulate_aes(vcpu, bus, &ctx, &a)?,
+        Insn::Aes(a) => {
+            let done = emulate_aes(vcpu, bus, &ctx, &a)?;
+            stats.emulated_aes += u64::from(done);
+            done
+        }
     };
     if done {
         stats.emulated += 1;
@@ -934,6 +959,18 @@ fn fetch_code(vcpu: &Vcpu, bus: &mut PlatformBus, rip: u64) -> Result<Vec<u8>> {
         gva = gva.wrapping_add(len as u64);
     }
     Ok(code)
+}
+
+/// Есть ли у CPU хоста AES-NI.
+fn host_has_aes() -> bool {
+    #[cfg(target_arch = "x86_64")]
+    {
+        std::arch::is_x86_feature_detected!("aes")
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        false
+    }
 }
 
 fn fault(vcpu: &Vcpu, reason: &'static str) -> Error {
