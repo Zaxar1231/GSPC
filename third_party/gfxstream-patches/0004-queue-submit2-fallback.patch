@@ -1,0 +1,114 @@
+diff --git a/host/vulkan/vk_decoder_global_state.cpp b/host/vulkan/vk_decoder_global_state.cpp
+index ba59f91..65a59e9 100644
+--- a/host/vulkan/vk_decoder_global_state.cpp
++++ b/host/vulkan/vk_decoder_global_state.cpp
+@@ -4793,7 +4793,8 @@ class VkDecoderGlobalState::Impl {
+                         VkResult res = VK_SUCCESS;
+                         if (pendingSubmitCall->mSubmitInfo2s.size()) {
+                             // Deferred vkQueueSubmit2 call
+-                            res = deviceDispatch->vkQueueSubmit2(
++                            res = queueSubmit2Compat(
++                                deviceDispatch,
+                                 unboxed_queue, pendingSubmitCall->mSubmitInfo2s.size(),
+                                 pendingSubmitCall->mSubmitInfo2s.data(), pendingSubmitCall->mFence);
+ 
+@@ -7903,6 +7904,90 @@ class VkDecoderGlobalState::Impl {
+         return true;
+     }
+ 
++    // RustDroid: drivers without VK_KHR_synchronization2 (e.g. Intel UHD 27.20.100.x, Vulkan
++    // 1.2) have neither vkQueueSubmit2 nor vkQueueSubmit2KHR, but the guest driver always
++    // submits VkSubmitInfo2. Translate it into a legacy vkQueueSubmit in that case.
++    static VkPipelineStageFlags legacyStageMask(VkPipelineStageFlags2 stages) {
++        const VkPipelineStageFlags low = static_cast<VkPipelineStageFlags>(stages & 0xFFFFFFFFull);
++        if ((stages >> 32) != 0 || low == 0) {
++            return VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
++        }
++        return low;
++    }
++
++    static VkResult queueSubmit2Compat(VulkanDispatch* vk, VkQueue queue, uint32_t submitCount,
++                                       const VkSubmitInfo2* pSubmits, VkFence fence) {
++        if (vk->vkQueueSubmit2) {
++            return vk->vkQueueSubmit2(queue, submitCount, pSubmits, fence);
++        }
++        if (!vk->vkQueueSubmit) {
++            return VK_ERROR_FEATURE_NOT_PRESENT;
++        }
++        struct Legacy {
++            std::vector<VkSemaphore> waits;
++            std::vector<uint64_t> waitValues;
++            std::vector<VkPipelineStageFlags> waitStages;
++            std::vector<VkCommandBuffer> commandBuffers;
++            std::vector<VkSemaphore> signals;
++            std::vector<uint64_t> signalValues;
++            VkTimelineSemaphoreSubmitInfo timeline;
++            VkProtectedSubmitInfo protectedInfo;
++        };
++        std::vector<Legacy> storage(submitCount);
++        std::vector<VkSubmitInfo> submits(submitCount);
++        for (uint32_t i = 0; i < submitCount; i++) {
++            const VkSubmitInfo2& in = pSubmits[i];
++            Legacy& l = storage[i];
++            bool hasValues = false;
++            for (uint32_t j = 0; j < in.waitSemaphoreInfoCount; j++) {
++                const VkSemaphoreSubmitInfo& w = in.pWaitSemaphoreInfos[j];
++                l.waits.push_back(w.semaphore);
++                l.waitValues.push_back(w.value);
++                l.waitStages.push_back(legacyStageMask(w.stageMask));
++                hasValues = hasValues || w.value != 0;
++            }
++            for (uint32_t j = 0; j < in.commandBufferInfoCount; j++) {
++                l.commandBuffers.push_back(in.pCommandBufferInfos[j].commandBuffer);
++            }
++            for (uint32_t j = 0; j < in.signalSemaphoreInfoCount; j++) {
++                const VkSemaphoreSubmitInfo& sg = in.pSignalSemaphoreInfos[j];
++                l.signals.push_back(sg.semaphore);
++                l.signalValues.push_back(sg.value);
++                hasValues = hasValues || sg.value != 0;
++            }
++            VkSubmitInfo& out = submits[i];
++            out = {};
++            out.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
++            out.waitSemaphoreCount = static_cast<uint32_t>(l.waits.size());
++            out.pWaitSemaphores = l.waits.data();
++            out.pWaitDstStageMask = l.waitStages.data();
++            out.commandBufferCount = static_cast<uint32_t>(l.commandBuffers.size());
++            out.pCommandBuffers = l.commandBuffers.data();
++            out.signalSemaphoreCount = static_cast<uint32_t>(l.signals.size());
++            out.pSignalSemaphores = l.signals.data();
++            const void* next = nullptr;
++            if (hasValues) {
++                l.timeline = {};
++                l.timeline.sType = VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO;
++                l.timeline.pNext = next;
++                l.timeline.waitSemaphoreValueCount = static_cast<uint32_t>(l.waitValues.size());
++                l.timeline.pWaitSemaphoreValues = l.waitValues.data();
++                l.timeline.signalSemaphoreValueCount = static_cast<uint32_t>(l.signalValues.size());
++                l.timeline.pSignalSemaphoreValues = l.signalValues.data();
++                next = &l.timeline;
++            }
++            if (in.flags & VK_SUBMIT_PROTECTED_BIT) {
++                l.protectedInfo = {};
++                l.protectedInfo.sType = VK_STRUCTURE_TYPE_PROTECTED_SUBMIT_INFO;
++                l.protectedInfo.pNext = next;
++                l.protectedInfo.protectedSubmit = VK_TRUE;
++                next = &l.protectedInfo;
++            }
++            out.pNext = next;
++        }
++        return vk->vkQueueSubmit(queue, submitCount, submits.data(), fence);
++    }
++
+     VkResult dispatchVkQueueSubmit(VulkanDispatch* vk, VkQueue unboxed_queue, uint32_t submitCount,
+                                    const VkSubmitInfo* pSubmits, VkFence fence) {
+         VkResult res = vk->vkQueueSubmit(unboxed_queue, submitCount, pSubmits, fence);
+@@ -7933,7 +8018,7 @@ class VkDecoderGlobalState::Impl {
+ 
+     VkResult dispatchVkQueueSubmit(VulkanDispatch* vk, VkQueue unboxed_queue, uint32_t submitCount,
+                                    const VkSubmitInfo2* pSubmits, VkFence fence) {
+-        VkResult res = vk->vkQueueSubmit2(unboxed_queue, submitCount, pSubmits, fence);
++        VkResult res = queueSubmit2Compat(vk, unboxed_queue, submitCount, pSubmits, fence);
+         if (res != VK_SUCCESS) {
+             GFXSTREAM_VERBOSE("vkQueueSubmit2 failed with %s [%d]", string_VkResult(res), res);
+             return res;

@@ -54,6 +54,10 @@
 - gfxstream падал по адресу 0 на драйверах Vulkan 1.2, когда Android вызывал `vkQueueSubmit2`:
   функции ядра Vulkan 1.3 у таких драйверов есть только под именами расширений (`…KHR`,
   `…EXT`), патч `0003-dispatch-core-1-3-aliases.patch` подставляет их.
+- Тот же сбой на драйвере Intel UHD 27.20.100.8984: в нём нет VK_KHR_synchronization2 вообще
+  (ни `vkQueueSubmit2`, ни `vkQueueSubmit2KHR`), а гостевой драйвер всегда отправляет
+  `VkSubmitInfo2`. Патч `0004-queue-submit2-fallback.patch` переводит такую отправку в обычный
+  `vkQueueSubmit` (семафоры, стадии ожидания, значения timeline-семафоров).
 
 - KeyMint падал с SIGILL в `_aesni_ctr32_6x` на CPU с AVX, но без AES-NI (i3-3220): BoringSSL
   видел AVX и выбирал AES-GCM на VEX-инструкциях (`VAESENC`); system_server после этого падал
