@@ -184,8 +184,21 @@ fn vulkan() -> bool {
             false
         }
         Ok(devices) => {
+            // Одна видеокарта бывает видна дважды (драйвер зарегистрирован двумя ICD).
+            let mut seen: Vec<(&String, usize)> = Vec::new();
             for d in &devices {
-                report(true, &format!("Vulkan: {d}"));
+                match seen.iter_mut().find(|(s, _)| *s == d) {
+                    Some((_, n)) => *n += 1,
+                    None => seen.push((d, 1)),
+                }
+            }
+            for (d, n) in seen {
+                let times = if n > 1 {
+                    format!(" ×{n}")
+                } else {
+                    String::new()
+                };
+                report(true, &format!("Vulkan: {d}{times}"));
             }
             true
         }

@@ -36,6 +36,10 @@
 
 ### Fixed
 
+- gfxstream падал при запуске на Intel UHD (драйвер Intel под Windows): пул дескрипторов
+  Vulkan-композитора был меньше нужного (`VK_ERROR_OUT_OF_POOL_MEMORY`), патч
+  `0002-compositor-descriptor-pool-size.patch`.
+
 - KeyMint падал с SIGILL в `_aesni_ctr32_6x` на CPU с AVX, но без AES-NI (i3-3220): BoringSSL
   видел AVX и выбирал AES-GCM на VEX-инструкциях (`VAESENC`); system_server после этого падал
   с `Failed to encrypt blob`. На таких CPU AVX (и FMA, F16C, AVX2, AVX-512, VAES, VPCLMULQDQ)
