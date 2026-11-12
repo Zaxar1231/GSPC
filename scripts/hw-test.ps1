@@ -3,16 +3,17 @@
     Проверка RustDroid на реальном железе: подготовка, сборка, этапы 1–3, архив с логами.
 
 .DESCRIPTION
-    Скрипт делает всё сам:
-      1. проверяет систему и при необходимости ставит Git, Rust и Visual Studio Build Tools (winget);
-      2. проверяет Windows Hypervisor Platform и предлагает включить её (UAC, нужна перезагрузка);
-      3. клонирует или обновляет репозиторий и собирает release;
-      4. скачивает ядро GKI, busybox и образы Cuttlefish x86_64 (последние удачные сборки);
-      5. этап 1: ядро Linux + busybox в serial-консоли (1 vCPU и SMP);
-      6. этап 2: Android в консоли (без окна);
-      7. этап 3: Android в окне — нужно ваше участие (тап, свайп, клавиатура), скриншоты окна
-         делаются автоматически;
-      8. собирает всё в архив на рабочем столе.
+    По умолчанию (быстрый режим):
+      1. проверяет систему и Windows Hypervisor Platform (предлагает включить, нужна перезагрузка);
+      2. скачивает готовый rustdroid.exe, собранный GitHub Actions для ветки (pre-release
+         nightly-<ветка>), — без Rust, Visual Studio Build Tools и сборки;
+      3. скачивает образы Cuttlefish x86_64 (один раз, дальше берёт из кэша);
+      4. этап 3: Android в окне — нужно ваше участие (тап, свайп, клавиатура); когда Android
+         загрузится, скрипт подаст звук; скриншоты окна делаются автоматически;
+      5. собирает всё в архив на рабочем столе.
+
+    С -FromSource — как раньше: ставит Git, Rust и Build Tools, собирает из исходников и может
+    прогнать этапы 1–2 (-Stages 1,2,3).
 
     Запуск (PowerShell, не от администратора):
       irm https://raw.githubusercontent.com/Zaxar1231/GSPC/feat/stage-3-display-input/scripts/hw-test.ps1 -OutFile $env:TEMP\hw-test.ps1
@@ -22,11 +23,14 @@
       powershell -ExecutionPolicy Bypass -File scripts\hw-test.ps1
 
 .PARAMETER Stages
-    Какие этапы проверять: 1, 2, 3 (по умолчанию все).
+    Какие этапы проверять: 1, 2, 3 (по умолчанию только 3; этап 1 — только с -FromSource).
+
+.PARAMETER FromSource
+    Собрать из исходников вместо готового rustdroid.exe.
 #>
 [CmdletBinding()]
 param(
-    [int[]]$Stages = @(1, 2, 3),
+    [int[]]$Stages = @(3),
     [string]$Branch = 'feat/stage-3-display-input',
     [string]$RepoDir = '',
     [int]$Memory = 4096,
@@ -38,6 +42,7 @@ param(
     [string]$CfBuild = 'latest',
     [string]$KernelBuild = 'latest',
     [switch]$SkipBuild,
+    [switch]$FromSource,
     [switch]$Yes
 )
 
@@ -218,117 +223,159 @@ if (-not $cs.HypervisorPresent -and -not $cpu.VirtualizationFirmwareEnabled) {
 
 # ---------------------------------------------------- инструменты ---
 
-Step 'Инструменты сборки'
-Refresh-Path
-# Установка через winget только из источника winget (msstore требует соглашений и региона).
-function Winget-Install([string]$Id, [string[]]$Extra = @()) {
-    if (-not (Has 'winget')) { return $false }
-    $rc = Native 'winget' (@('install', '--id', $Id, '-e', '--source', 'winget',
-            '--accept-source-agreements', '--accept-package-agreements') + $Extra)
-    return ($rc -eq 0)
-}
+$Owner = 'Zaxar1231'
+$RepoName = 'GSPC'
+$Work = Join-Path $env:LOCALAPPDATA 'RustDroid\hw-test'
+New-Item -ItemType Directory -Force -Path $Work | Out-Null
 
-# Скачивает установщик с официального сайта и запускает его (запасной путь, если winget сломан).
-function Direct-Install([string]$Url, [string]$File, [string[]]$Arguments) {
-    $exe = Join-Path $env:TEMP $File
-    Say "  скачиваю $Url"
+function Download([string]$Url, [string]$Dest) {
     [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-    Invoke-WebRequest -Uri $Url -OutFile $exe -UseBasicParsing
-    Say "  запускаю $File (может запросить права администратора)"
-    $p = Start-Process -FilePath $exe -ArgumentList $Arguments -Wait -PassThru
-    return $p.ExitCode
+    Invoke-WebRequest -Uri $Url -OutFile $Dest -UseBasicParsing
 }
 
-function Git-InstallerUrl {
-    $rel = Invoke-RestMethod -Uri 'https://api.github.com/repos/git-for-windows/git/releases/latest' -UseBasicParsing
-    $asset = $rel.assets | Where-Object { $_.name -match '^Git-.*-64-bit\.exe$' } | Select-Object -First 1
-    if (-not $asset) { throw 'не найден установщик Git for Windows' }
-    return $asset.browser_download_url
-}
-
-function Ensure-Tool([string]$Cmd, [string]$WingetId, [string]$Title, [scriptblock]$Direct) {
-    if (Has $Cmd) { Ok "$Title найден"; return }
-    if (-not (Ask "$Title не найден. Установить?")) { throw "нет $Title" }
-    if (-not (Winget-Install $WingetId)) {
-        Warn "winget не смог установить $Title — ставлю установщиком с официального сайта"
-        try { $null = & $Direct } catch { Fail "установка $Title не удалась: $_" }
-    }
+if ($FromSource) {
+    Step 'Инструменты сборки'
     Refresh-Path
-    if (-not (Has $Cmd)) {
-        Fail "$Title не установлен. Поставьте его вручную и запустите скрипт ещё раз"
-        throw "нет $Title"
+    # Установка через winget только из источника winget (msstore требует соглашений и региона).
+    function Winget-Install([string]$Id, [string[]]$Extra = @()) {
+        if (-not (Has 'winget')) { return $false }
+        $rc = Native 'winget' (@('install', '--id', $Id, '-e', '--source', 'winget',
+                '--accept-source-agreements', '--accept-package-agreements') + $Extra)
+        return ($rc -eq 0)
     }
-    Ok "$Title установлен"
-}
 
-Ensure-Tool 'git' 'Git.Git' 'Git' {
-    Direct-Install (Git-InstallerUrl) 'git-setup.exe' @('/VERYSILENT', '/NORESTART', '/NOCANCEL', '/SP-')
-}
+    # Скачивает установщик с официального сайта и запускает его (запасной путь, если winget сломан).
+    function Direct-Install([string]$Url, [string]$File, [string[]]$Arguments) {
+        $exe = Join-Path $env:TEMP $File
+        Say "  скачиваю $Url"
+        [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+        Invoke-WebRequest -Uri $Url -OutFile $exe -UseBasicParsing
+        Say "  запускаю $File (может запросить права администратора)"
+        $p = Start-Process -FilePath $exe -ArgumentList $Arguments -Wait -PassThru
+        return $p.ExitCode
+    }
 
-$vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
-function Find-Msvc {
-    if (-not (Test-Path $vswhere)) { return $null }
-    return (& $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath)
-}
-$vc = Find-Msvc
-if ($vc) {
-    Ok "MSVC найден: $vc"
-} else {
-    if (-not (Ask 'Нет Visual Studio Build Tools (C++). Установить? (~5 ГБ, 10–30 минут)')) { throw 'нет MSVC' }
-    $vsArgs = '--quiet --wait --norestart --add Microsoft.VisualStudio.Workload.VCTools --includeRecommended'
-    if (-not (Winget-Install 'Microsoft.VisualStudio.2022.BuildTools' @('--override', $vsArgs))) {
-        Warn 'winget не смог установить Build Tools — ставлю установщиком с сайта Microsoft'
-        try { $null = Direct-Install 'https://aka.ms/vs/17/release/vs_BuildTools.exe' 'vs_BuildTools.exe' $vsArgs }
-        catch { Fail "установка Build Tools не удалась: $_" }
+    function Git-InstallerUrl {
+        $rel = Invoke-RestMethod -Uri 'https://api.github.com/repos/git-for-windows/git/releases/latest' -UseBasicParsing
+        $asset = $rel.assets | Where-Object { $_.name -match '^Git-.*-64-bit\.exe$' } | Select-Object -First 1
+        if (-not $asset) { throw 'не найден установщик Git for Windows' }
+        return $asset.browser_download_url
+    }
+
+    function Ensure-Tool([string]$Cmd, [string]$WingetId, [string]$Title, [scriptblock]$Direct) {
+        if (Has $Cmd) { Ok "$Title найден"; return }
+        if (-not (Ask "$Title не найден. Установить?")) { throw "нет $Title" }
+        if (-not (Winget-Install $WingetId)) {
+            Warn "winget не смог установить $Title — ставлю установщиком с официального сайта"
+            try { $null = & $Direct } catch { Fail "установка $Title не удалась: $_" }
+        }
+        Refresh-Path
+        if (-not (Has $Cmd)) {
+            Fail "$Title не установлен. Поставьте его вручную и запустите скрипт ещё раз"
+            throw "нет $Title"
+        }
+        Ok "$Title установлен"
+    }
+
+    Ensure-Tool 'git' 'Git.Git' 'Git' {
+        Direct-Install (Git-InstallerUrl) 'git-setup.exe' @('/VERYSILENT', '/NORESTART', '/NOCANCEL', '/SP-')
+    }
+
+    $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
+    function Find-Msvc {
+        if (-not (Test-Path $vswhere)) { return $null }
+        return (& $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath)
     }
     $vc = Find-Msvc
-    if (-not $vc) { Fail 'Visual Studio Build Tools не установлены. Поставьте их вручную и запустите скрипт ещё раз'; throw 'нет MSVC' }
-    Ok "Visual Studio Build Tools установлены: $vc"
-}
-
-Ensure-Tool 'cargo' 'Rustlang.Rustup' 'Rust (rustup)' {
-    Direct-Install 'https://win.rustup.rs/x86_64' 'rustup-init.exe' @('-y', '--profile', 'minimal')
-}
-
-# ---------------------------------------------------- репозиторий ---
-
-Step 'Исходники'
-$here = if ($PSScriptRoot) { Split-Path -Parent $PSScriptRoot } else { '' }
-if (-not $RepoDir) {
-    if ($here -and (Test-Path (Join-Path $here 'Cargo.toml'))) { $RepoDir = $here }
-    else { $RepoDir = Join-Path $HOME 'RustDroid' }
-}
-$script:Repo = $RepoDir
-if (-not (Test-Path (Join-Path $Repo '.git'))) {
-    Say "  клонирую в $Repo"
-    if ((Native 'git' @('clone', '--branch', $Branch, $RepoUrl, $Repo)) -ne 0) { Fail 'git clone не удался'; throw 'git clone' }
-} else {
-    $dirty = & git -C $Repo status --porcelain --untracked-files=no
-    if ($dirty) {
-        Warn "В $Repo есть локальные изменения — обновление пропущено"
+    if ($vc) {
+        Ok "MSVC найден: $vc"
     } else {
-        $null = Native 'git' @('-C', $Repo, 'fetch', 'origin', $Branch)
-        $null = Native 'git' @('-C', $Repo, 'checkout', $Branch)
-        if ((Native 'git' @('-C', $Repo, 'pull', '--ff-only', 'origin', $Branch)) -ne 0) {
-            Warn 'git pull не удался — проверяю текущую версию'
+        if (-not (Ask 'Нет Visual Studio Build Tools (C++). Установить? (~5 ГБ, 10–30 минут)')) { throw 'нет MSVC' }
+        $vsArgs = '--quiet --wait --norestart --add Microsoft.VisualStudio.Workload.VCTools --includeRecommended'
+        if (-not (Winget-Install 'Microsoft.VisualStudio.2022.BuildTools' @('--override', $vsArgs))) {
+            Warn 'winget не смог установить Build Tools — ставлю установщиком с сайта Microsoft'
+            try { $null = Direct-Install 'https://aka.ms/vs/17/release/vs_BuildTools.exe' 'vs_BuildTools.exe' $vsArgs }
+            catch { Fail "установка Build Tools не удалась: $_" }
+        }
+        $vc = Find-Msvc
+        if (-not $vc) { Fail 'Visual Studio Build Tools не установлены. Поставьте их вручную и запустите скрипт ещё раз'; throw 'нет MSVC' }
+        Ok "Visual Studio Build Tools установлены: $vc"
+    }
+
+    Ensure-Tool 'cargo' 'Rustlang.Rustup' 'Rust (rustup)' {
+        Direct-Install 'https://win.rustup.rs/x86_64' 'rustup-init.exe' @('-y', '--profile', 'minimal')
+    }
+
+    # ---------------------------------------------------- репозиторий ---
+
+    Step 'Исходники'
+    $here = if ($PSScriptRoot) { Split-Path -Parent $PSScriptRoot } else { '' }
+    if (-not $RepoDir) {
+        if ($here -and (Test-Path (Join-Path $here 'Cargo.toml'))) { $RepoDir = $here }
+        else { $RepoDir = Join-Path $HOME 'RustDroid' }
+    }
+    $script:Repo = $RepoDir
+    if (-not (Test-Path (Join-Path $Repo '.git'))) {
+        Say "  клонирую в $Repo"
+        if ((Native 'git' @('clone', '--branch', $Branch, $RepoUrl, $Repo)) -ne 0) { Fail 'git clone не удался'; throw 'git clone' }
+    } else {
+        $dirty = & git -C $Repo status --porcelain --untracked-files=no
+        if ($dirty) {
+            Warn "В $Repo есть локальные изменения — обновление пропущено"
+        } else {
+            $null = Native 'git' @('-C', $Repo, 'fetch', 'origin', $Branch)
+            $null = Native 'git' @('-C', $Repo, 'checkout', $Branch)
+            if ((Native 'git' @('-C', $Repo, 'pull', '--ff-only', 'origin', $Branch)) -ne 0) {
+                Warn 'git pull не удался — проверяю текущую версию'
+            }
         }
     }
-}
-$commit = (& git -C $Repo rev-parse --short HEAD).Trim()
-Ok "Репозиторий $Repo, ветка $Branch, коммит $commit"
-"commit: $commit`nbranch: $Branch" | Add-Content -Path (Join-Path $Out 'system.txt') -Encoding UTF8
-Set-Location $Repo
+    $commit = (& git -C $Repo rev-parse --short HEAD).Trim()
+    Ok "Репозиторий $Repo, ветка $Branch, коммит $commit"
+    "commit: $commit`nbranch: $Branch" | Add-Content -Path (Join-Path $Out 'system.txt') -Encoding UTF8
+    Set-Location $Repo
 
-# ------------------------------------------------------------ сборка ---
+    # ------------------------------------------------------------ сборка ---
 
-Step 'Сборка release'
-$script:Exe = Join-Path $Repo 'target\release\rustdroid.exe'
-if (-not $SkipBuild) {
-    $rc = Run-Logged 'cargo' @('build', '--release', '--locked') (Join-Path $Out 'build.log')
-    if ($rc -ne 0) { Fail 'Сборка не удалась (build.log)'; }
-    else { Ok 'Сборка прошла' }
+    Step 'Сборка release'
+    $script:Exe = Join-Path $Repo 'target\release\rustdroid.exe'
+    if (-not $SkipBuild) {
+        $rc = Run-Logged 'cargo' @('build', '--release', '--locked') (Join-Path $Out 'build.log')
+        if ($rc -ne 0) { Fail 'Сборка не удалась (build.log)'; }
+        else { Ok 'Сборка прошла' }
+    }
+    if (-not (Test-Path $Exe)) { Fail 'rustdroid.exe не найден'; $Stages = @() }
+} else {
+    Step 'Готовый rustdroid.exe (GitHub Actions)'
+    $tag = 'nightly-' + ($Branch -replace '[^A-Za-z0-9._-]', '-')
+    $base = "https://github.com/$Owner/$RepoName/releases/download/$tag"
+    $script:Repo = $Work
+    $script:Exe = Join-Path $Work 'rustdroid.exe'
+    try {
+        Download "$base/rustdroid.exe.sha256" (Join-Path $Work 'rustdroid.exe.sha256')
+        Download "$base/commit.txt" (Join-Path $Work 'commit.txt')
+        $want = (Get-Content (Join-Path $Work 'rustdroid.exe.sha256') -Raw).Trim().ToLower()
+        $have = if (Test-Path $Exe) { (Get-FileHash -Algorithm SHA256 $Exe).Hash.ToLower() } else { '' }
+        if ($have -ne $want) {
+            Say "  скачиваю $base/rustdroid.exe"
+            Download "$base/rustdroid.exe" $Exe
+            $have = (Get-FileHash -Algorithm SHA256 $Exe).Hash.ToLower()
+            if ($have -ne $want) { Remove-Item $Exe -Force; throw "sha256 не совпал: $have" }
+        }
+        $commit = (Get-Content (Join-Path $Work 'commit.txt') -Raw).Trim()
+        $short = $commit.Substring(0, [math]::Min(7, $commit.Length))
+        Ok "rustdroid.exe из $tag, коммит $short"
+        "commit: $commit`nbranch: $Branch`nmode: prebuilt" | Add-Content -Path (Join-Path $Out 'system.txt') -Encoding UTF8
+    } catch {
+        Fail "Не удалось скачать готовый rustdroid.exe ($_). Запустите скрипт с -FromSource"
+        $Stages = @()
+    }
+    if ($Stages -contains 1) {
+        Warn 'Этап 1 доступен только с -FromSource — пропускаю'
+        $Stages = @($Stages | Where-Object { $_ -ne 1 })
+    }
+    Set-Location $Work
 }
-if (-not (Test-Path $Exe)) { Fail 'rustdroid.exe не найден'; $Stages = @() }
 
 if (Test-Path $Exe) {
     Step 'rustdroid check'
@@ -350,13 +397,57 @@ if ($Stages -contains 1) {
     if ($rc -ne 0 -or $rc2 -ne 0 -or -not $kernel) { Fail 'Не удалось скачать ядро или busybox (fetch.log)' }
     else { Ok "Ядро: $(Split-Path -Leaf $kernel)" }
 }
+# Образы Cuttlefish без cargo: номер сборки из status.json, zip, распаковка; кэш переиспользуется.
+function Find-CachedImages([string]$Id) {
+    $roots = @((Join-Path $HOME 'RustDroid\guest\cache'), $Work)
+    if ($script:Repo) { $roots += (Join-Path $script:Repo 'guest\cache') }
+    $dirs = foreach ($r in $roots | Select-Object -Unique) {
+        Get-ChildItem $r -Directory -Filter 'cf-*' -ErrorAction SilentlyContinue |
+            Where-Object { Test-Path (Join-Path $_.FullName 'super.img') }
+    }
+    if ($Id) { $dirs = $dirs | Where-Object { $_.Name -eq "cf-$Id" } }
+    return ($dirs | Sort-Object LastWriteTime -Descending | Select-Object -First 1 -ExpandProperty FullName)
+}
+
+function Fetch-Images {
+    $branch = 'aosp-android-latest-release'
+    $target = 'aosp_cf_x86_64_only_phone-userdebug'
+    $id = $CfBuild
+    if ($id -eq 'latest') {
+        try {
+            $status = Invoke-RestMethod -Uri "https://ci.android.com/builds/branches/$branch/status.json" -UseBasicParsing
+            $id = ($status.targets | Where-Object { $_.name -eq $target } | Select-Object -First 1).last_known_good_build
+        } catch {
+            Warn "ci.android.com недоступен ($_) — беру образы из кэша"
+            return (Find-CachedImages '')
+        }
+    }
+    $cached = Find-CachedImages $id
+    if ($cached) { Say "  образы уже есть: $cached"; return $cached }
+    $dir = Join-Path $Work "cf-$id"
+    New-Item -ItemType Directory -Force -Path $dir | Out-Null
+    $zip = Join-Path $dir "aosp_cf_x86_64_only_phone-img-$id.zip"
+    Say "  скачиваю образы сборки $id (~1,1 ГБ)"
+    Download "https://ci.android.com/builds/submitted/$id/$target/latest/raw/aosp_cf_x86_64_only_phone-img-$id.zip" $zip
+    Say '  распаковываю (несколько минут)'
+    $tar = Get-Command tar -ErrorAction SilentlyContinue
+    if ($tar) { $null = Native $tar.Source @('-xf', $zip, '-C', $dir) }
+    if (-not (Test-Path (Join-Path $dir 'super.img'))) { Expand-Archive -LiteralPath $zip -DestinationPath $dir -Force }
+    if (-not (Test-Path (Join-Path $dir 'super.img'))) { throw 'в архиве нет super.img' }
+    Remove-Item $zip -Force
+    return $dir
+}
+
 if ($Stages -contains 2 -or $Stages -contains 3) {
-    Step 'Образы Android (Cuttlefish x86_64, ~1,2 ГБ + ~4 ГБ после распаковки)'
-    $rc = Run-Logged 'cargo' @('xtask', 'cf-fetch', '--build', $CfBuild) (Join-Path $Out 'fetch.log')
-    $images = Get-ChildItem $cache -Directory -Filter 'cf-*' -ErrorAction SilentlyContinue |
-        Where-Object { Test-Path (Join-Path $_.FullName 'super.img') } |
-        Sort-Object LastWriteTime -Descending | Select-Object -First 1 -ExpandProperty FullName
-    if ($rc -ne 0 -or -not $images) { Fail 'Не удалось скачать образы Android (fetch.log)'; $images = $null }
+    Step 'Образы Android (Cuttlefish x86_64, ~1,2 ГБ один раз)'
+    if ($FromSource) {
+        $rc = Run-Logged 'cargo' @('xtask', 'cf-fetch', '--build', $CfBuild) (Join-Path $Out 'fetch.log')
+        $images = Find-CachedImages ''
+        if ($rc -ne 0) { $images = $null }
+    } else {
+        try { $images = Fetch-Images } catch { Warn "загрузка образов: $_"; $images = $null }
+    }
+    if (-not $images) { Fail 'Не удалось получить образы Android'; $images = $null }
     else { Ok "Образы: $(Split-Path -Leaf $images)" }
 }
 
@@ -411,15 +502,27 @@ if ($Stages -contains 3 -and $images -and (Test-Path $Exe)) {
     Say '    1) тапните левой кнопкой мыши по значку или кнопке;' 'Yellow'
     Say '    2) сделайте свайп (зажмите левую кнопку и проведите), например потяните шторку сверху;' 'Yellow'
     Say '    3) откройте поле ввода (поиск) и напечатайте что-нибудь с клавиатуры.' 'Yellow'
-    Say '  Окно закроется само; можно закрыть раньше, когда всё проверите.' 'Yellow'
+    Say '  Когда Android загрузится, скрипт подаст звук. Проверьте и закройте окно —' 'Yellow'
+    Say "  ждать все $Stage3Seconds с не нужно." 'Yellow'
     Say '  Скриншоты окна делаются автоматически раз в 30 секунд (только окно RustDroid).' 'Yellow'
     if (-not $Yes) { Read-Host '  Нажмите Enter, чтобы начать' | Out-Null }
 
     $serial = Join-Path $Out 'stage3-serial.log'
     $script:shot = 0
     $script:nextShot = (Get-Date).AddSeconds(30)
+    $script:bootSeen = $false
+    $script:nextBootCheck = (Get-Date).AddSeconds(10)
     $snap = {
         param($p)
+        if (-not $script:bootSeen -and (Get-Date) -ge $script:nextBootCheck) {
+            $script:nextBootCheck = (Get-Date).AddSeconds(10)
+            try { $script:bootSeen = Log-Has $serial 'sys.boot_completed=1' } catch { }
+            if ($script:bootSeen) {
+                Say ''
+                Say '  >>> Android загрузился! Проверьте тап, свайп и клавиатуру, затем закройте окно. <<<' 'Green'
+                try { [Console]::Beep(880, 300); [Console]::Beep(1175, 300) } catch { }
+            }
+        }
         if ((Get-Date) -lt $script:nextShot) { return }
         $script:nextShot = (Get-Date).AddSeconds(30)
         $p.Refresh()

@@ -1,0 +1,52 @@
+name: Nightly
+
+# Готовый rustdroid.exe для проверки на железе после каждого пуша: scripts/hw-test.ps1 скачивает
+# его из pre-release `nightly-<ветка>`, и на тестовом компьютере не нужны ни Rust, ни Visual
+# Studio Build Tools. Это не релиз: без подписи, без установщика, тег перезаписывается.
+
+on:
+  push:
+    branches: [main, "feat/**"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: nightly-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Release-сборка
+        run: cargo build --release --locked -p rustdroid
+
+      - name: Публикация в pre-release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $tag = 'nightly-' + ('${{ github.ref_name }}' -replace '[^A-Za-z0-9._-]', '-')
+          $dir = Join-Path $env:RUNNER_TEMP 'nightly'
+          New-Item -ItemType Directory -Force -Path $dir | Out-Null
+          Copy-Item target/release/rustdroid.exe $dir
+          $hash = (Get-FileHash -Algorithm SHA256 (Join-Path $dir 'rustdroid.exe')).Hash.ToLower()
+          Set-Content -Path (Join-Path $dir 'rustdroid.exe.sha256') -Value $hash -NoNewline
+          Set-Content -Path (Join-Path $dir 'commit.txt') -Value '${{ github.sha }}' -NoNewline
+          # Тег и релиз пересоздаются, чтобы указывать на последний коммит ветки.
+          gh release delete $tag --cleanup-tag --yes 2>$null
+          $global:LASTEXITCODE = 0
+          $notes = "Сборка для проверки на железе (scripts/hw-test.ps1), коммит ${{ github.sha }}. Не релиз."
+          gh release create $tag --prerelease --target '${{ github.sha }}' --title $tag --notes $notes `
+            (Join-Path $dir 'rustdroid.exe') (Join-Path $dir 'rustdroid.exe.sha256') (Join-Path $dir 'commit.txt')
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          "Опубликовано: $tag, sha256 $hash"
