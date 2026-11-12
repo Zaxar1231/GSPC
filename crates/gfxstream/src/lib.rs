@@ -19,10 +19,20 @@ pub use renderer::{Config, Library, Renderer, Transfer};
 /// Имя библиотеки.
 pub const LIBRARY_NAME: &str = "gfxstream_backend.dll";
 
-/// Capset gfxstream для Vulkan (`VIRTIO_GPU_CAPSET_GFXSTREAM_VULKAN`).
+/// Capset gfxstream для Vulkan (`VIRTGPU_CAPSET_GFXSTREAM_VULKAN`).
 pub const CAPSET_GFXSTREAM_VULKAN: u32 = 3;
-/// Capset gfxstream для GLES (`VIRTIO_GPU_CAPSET_GFXSTREAM_GLES`).
-pub const CAPSET_GFXSTREAM_GLES: u32 = 7;
+/// Capset gfxstream для Magma (`VIRTGPU_CAPSET_GFXSTREAM_MAGMA`).
+pub const CAPSET_GFXSTREAM_MAGMA: u32 = 7;
+/// Capset gfxstream для GLES (`VIRTGPU_CAPSET_GFXSTREAM_GLES`).
+pub const CAPSET_GFXSTREAM_GLES: u32 = 8;
+/// Capset gfxstream для композитора (`VIRTGPU_CAPSET_GFXSTREAM_COMPOSER`).
+pub const CAPSET_GFXSTREAM_COMPOSER: u32 = 9;
+/// Capsets, которые gfxstream отдаёт гостю (в порядке индексов `GET_CAPSET_INFO`).
+pub const CAPSETS: [u32; 3] = [
+    CAPSET_GFXSTREAM_VULKAN,
+    CAPSET_GFXSTREAM_GLES,
+    CAPSET_GFXSTREAM_COMPOSER,
+];
 
 /// Сработавший фенс.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
