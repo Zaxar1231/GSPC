@@ -16,7 +16,7 @@
     прогнать этапы 1–2 (-Stages 1,2,3).
 
     Запуск (PowerShell, не от администратора):
-      irm https://raw.githubusercontent.com/Zaxar1231/GSPC/feat/stage-3-display-input/scripts/hw-test.ps1 -OutFile $env:TEMP\hw-test.ps1
+      irm https://raw.githubusercontent.com/Zaxar1231/GSPC/main/scripts/hw-test.ps1 -OutFile $env:TEMP\hw-test.ps1
       powershell -ExecutionPolicy Bypass -File $env:TEMP\hw-test.ps1
 
     Или из клона репозитория:
@@ -31,7 +31,7 @@
 [CmdletBinding()]
 param(
     [int[]]$Stages = @(3),
-    [string]$Branch = 'feat/stage-3-display-input',
+    [string]$Branch = 'main',
     [string]$RepoDir = '',
     [int]$Memory = 4096,
     [int]$Cpus = 4,
