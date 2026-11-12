@@ -51,6 +51,9 @@
 - gfxstream падал при запуске на Intel UHD (драйвер Intel под Windows): пул дескрипторов
   Vulkan-композитора был меньше нужного (`VK_ERROR_OUT_OF_POOL_MEMORY`), патч
   `0002-compositor-descriptor-pool-size.patch`.
+- gfxstream падал по адресу 0 на драйверах Vulkan 1.2, когда Android вызывал `vkQueueSubmit2`:
+  функции ядра Vulkan 1.3 у таких драйверов есть только под именами расширений (`…KHR`,
+  `…EXT`), патч `0003-dispatch-core-1-3-aliases.patch` подставляет их.
 
 - KeyMint падал с SIGILL в `_aesni_ctr32_6x` на CPU с AVX, но без AES-NI (i3-3220): BoringSSL
   видел AVX и выбирал AES-GCM на VEX-инструкциях (`VAESENC`); system_server после этого падал
