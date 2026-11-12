@@ -167,6 +167,48 @@ pub(crate) fn fetch_kernel(args: &[String]) -> Result<()> {
 
 /// Ветка ci.android.com с образами Cuttlefish по умолчанию (публичная, последний релиз AOSP).
 const CF_BRANCH: &str = "aosp-android-latest-release";
+/// Распаковывает zip: `tar` (bsdtar есть в Windows 10/11 и Linux), затем `tar.exe` из
+/// System32 (если PATH испорчен), затем PowerShell `Expand-Archive`.
+fn unzip(zip: &Path, dir: &Path) -> Result<()> {
+    let mut tars = vec![PathBuf::from("tar")];
+    if let Some(root) = std::env::var_os("SystemRoot") {
+        tars.push(PathBuf::from(root).join("System32").join("tar.exe"));
+    }
+    for tar in &tars {
+        match Command::new(tar)
+            .arg("-xf")
+            .arg(zip)
+            .arg("-C")
+            .arg(dir)
+            .status()
+        {
+            Ok(s) if s.success() => return Ok(()),
+            Ok(s) => println!("{} завершился с {s}, пробую другой способ", tar.display()),
+            Err(e) => println!("{} недоступен ({e}), пробую другой способ", tar.display()),
+        }
+    }
+    if cfg!(windows) {
+        println!("распаковка через PowerShell Expand-Archive (может занять несколько минут)");
+        // Пути передаются через переменные окружения: так не нужно экранировать кавычки.
+        let script = "$ErrorActionPreference = 'Stop'; \
+                      Expand-Archive -LiteralPath $env:RD_ZIP -DestinationPath $env:RD_DIR -Force";
+        let status = Command::new("powershell")
+            .args(["-NoProfile", "-NonInteractive", "-Command", script])
+            .env("RD_ZIP", zip)
+            .env("RD_DIR", dir)
+            .status()
+            .context("не удалось запустить PowerShell")?;
+        if status.success() {
+            return Ok(());
+        }
+        bail!(
+            "распаковка {} через PowerShell не удалась: {status}",
+            zip.display()
+        );
+    }
+    bail!("не удалось распаковать {}: нет tar", zip.display())
+}
+
 /// Таргет Cuttlefish x86_64 по умолчанию (имя таргета зависит от ветки ci.android.com).
 const CF_TARGET: &str = "aosp_cf_x86_64_only_phone-userdebug";
 
@@ -214,17 +256,7 @@ pub(crate) fn fetch_cuttlefish(args: &[String]) -> Result<()> {
         println!("образы уже распакованы: {}", dir.display());
         return Ok(());
     }
-    // tar из Windows 10/11 (bsdtar) распаковывает zip.
-    let status = Command::new("tar")
-        .arg("-xf")
-        .arg(&zip)
-        .arg("-C")
-        .arg(&dir)
-        .status()
-        .context("не удалось запустить tar")?;
-    if !status.success() {
-        bail!("распаковка {} не удалась: {status}", zip.display());
-    }
+    unzip(&zip, &dir)?;
     for needed in ["boot.img", "vendor_boot.img", "super.img"] {
         if !dir.join(needed).is_file() {
             bail!("в архиве нет {needed} — проверьте таргет сборки");
