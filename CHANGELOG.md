@@ -58,6 +58,10 @@
   (ни `vkQueueSubmit2`, ни `vkQueueSubmit2KHR`), а гостевой драйвер всегда отправляет
   `VkSubmitInfo2`. Патч `0004-queue-submit2-fallback.patch` переводит такую отправку в обычный
   `vkQueueSubmit` (семафоры, стадии ожидания, значения timeline-семафоров).
+- Команды synchronization2 в буферах команд (`vkCmdPipelineBarrier2`, `vkCmdWaitEvents2`,
+  `vkCmdSetEvent2`, `vkCmdResetEvent2`, `vkCmdWriteTimestamp2`) на таком драйвере тоже вели бы
+  в пустой указатель; патч `0005-sync2-command-shims.patch` подставляет переходники на обычные
+  команды Vulkan 1.0.
 
 - KeyMint падал с SIGILL в `_aesni_ctr32_6x` на CPU с AVX, но без AES-NI (i3-3220): BoringSSL
   видел AVX и выбирал AES-GCM на VEX-инструкциях (`VAESENC`); system_server после этого падал
