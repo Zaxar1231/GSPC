@@ -11,8 +11,8 @@ use rustdroid_gfxstream::{CAPSETS, Config, Library, Renderer, Transfer, ffi};
 use rustdroid_virtio::GuestMemory;
 
 use crate::backend::{
-    Backend3d, BackendError, BackendResult, Blob, CapsetInfo, FenceId, FenceSink, MemEntry,
-    Resource3d, Transfer3d,
+    Backend3d, BackendError, BackendResult, Blob, BlobMapping, CapsetInfo, FenceId, FenceSink,
+    MemEntry, Resource3d, Transfer3d,
 };
 
 /// 3D-бэкенд gfxstream.
@@ -221,6 +221,34 @@ impl Backend3d for GfxstreamBackend {
         self.renderer
             .create_fence(f.fence_id, f.ctx_id, f.ring_idx)
             .map_err(|e| failed("create_fence", &e))
+    }
+
+    fn map_blob(&mut self, resource_id: u32) -> BackendResult<BlobMapping> {
+        let (ptr, size) = self
+            .renderer
+            .resource_map(resource_id)
+            .map_err(|e| failed("resource_map", &e))?;
+        let Some(ptr) = std::ptr::NonNull::new(ptr.cast::<u8>()) else {
+            return Err(BackendError::Failed);
+        };
+        let map_info = match self.renderer.resource_map_info(resource_id) {
+            Ok(info) => info & ffi::STREAM_RENDERER_MAP_CACHE_MASK,
+            Err(e) => {
+                let _ = self.renderer.resource_unmap(resource_id);
+                return Err(failed("resource_map_info", &e));
+            }
+        };
+        Ok(BlobMapping {
+            ptr,
+            size,
+            map_info,
+        })
+    }
+
+    fn unmap_blob(&mut self, resource_id: u32) {
+        if let Err(e) = self.renderer.resource_unmap(resource_id) {
+            tracing::debug!(resource_id, error = %e, "resource_unmap");
+        }
     }
 
     fn read_pixels(

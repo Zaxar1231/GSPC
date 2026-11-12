@@ -7,6 +7,7 @@
 use crate::error::Result;
 use crate::layout::{
     ACPI_ADDR, ACPI_SIZE, ECAM_ADDR, IOAPIC_ADDR, LAPIC_ADDR, PCI_MMIO_END, PCI_MMIO_START,
+    PCI_MMIO64_END, PCI_MMIO64_START,
 };
 use crate::memory::GuestRam;
 
@@ -239,6 +240,18 @@ fn pci_root() -> Vec<u8> {
     for v in [0, min, max, 0, len] {
         res.extend_from_slice(&v.to_le_bytes());
     }
+    // QWordMemory(ResourceProducer, PosDecode, MinFixed, MaxFixed, Prefetchable, ReadWrite):
+    // окно 64-битных BAR (общая память virtio-gpu).
+    res.extend_from_slice(&[0x8A, 0x2B, 0x00, 0x00, 0x0C, 0x07]);
+    for v in [
+        0,
+        PCI_MMIO64_START,
+        PCI_MMIO64_END - 1,
+        0,
+        PCI_MMIO64_END - PCI_MMIO64_START,
+    ] {
+        res.extend_from_slice(&v.to_le_bytes());
+    }
     res.extend_from_slice(&[0x79, 0x00]);
     let mut body = aml::name(b"_HID", &aml::dword(aml::eisa_id(b"PNP0A08")));
     body.extend(aml::name(b"_CID", &aml::dword(aml::eisa_id(b"PNP0A03"))));
@@ -370,10 +383,19 @@ mod tests {
     #[test]
     fn pci_root_resources() {
         let root = pci_root();
-        // _CRS: BufferOp, PkgLength = 1 + BufferSize (2) + 44 байта ресурсов
-        // (WordBusNumber 16 + DWordMemory 26 + EndTag 2).
+        // _CRS: BufferOp, PkgLength (2 байта) = 2 + BufferSize (2) + 90 байт ресурсов
+        // (WordBusNumber 16 + DWordMemory 26 + QWordMemory 46 + EndTag 2).
         let crs = root.windows(4).position(|w| w == b"_CRS").unwrap();
-        assert_eq!(&root[crs + 4..crs + 8], &[0x11, 47, 0x0A, 44]);
+        assert_eq!(
+            &root[crs + 4..crs + 9],
+            &[0x11, 0x40 | (94 & 0xF), 94 >> 4, 0x0A, 90]
+        );
+        let q = crs + 9 + 16 + 26;
+        assert_eq!(root[q], 0x8A);
+        assert_eq!(
+            u64::from_le_bytes(root[q + 14..q + 22].try_into().unwrap()),
+            PCI_MMIO64_START
+        );
         let dsdt = dsdt(&AcpiConfig::default());
         assert!(dsdt.windows(4).any(|w| w == b"PCI0"));
         let m = mcfg();

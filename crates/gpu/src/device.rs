@@ -8,8 +8,9 @@
 //! аргументы и ведёт учёт. Команда с фенсом возвращается гостю только после того, как бэкенд
 //! сообщит о выполнении фенса через [`FenceSink`]; до этого её цепочка дескрипторов придержана.
 //!
-//! Пока не сделано: общая память (shm-область PCI) для `RESOURCE_MAP_BLOB` — host-visible
-//! blob-ресурсы гостю недоступны; кадр 3D-ресурса читается через CPU (zero-copy — задача 4.5).
+//! Host-visible blob-ресурсы (`RESOURCE_MAP_BLOB`) отображаются в область общей памяти
+//! устройства (BAR2, [`ShmMapper`]), если она задана ([`VirtioGpu::with_shm`]). Кадр
+//! 3D-ресурса пока читается через CPU (zero-copy — задача 4.5).
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -19,7 +20,8 @@ use rustdroid_virtio::device::TYPE_GPU;
 use rustdroid_virtio::{Chain, GuestMemory, Queue, QueueError, VirtioDevice};
 
 use crate::backend::{
-    Backend3d, BackendError, Blob, Box3d, FenceId, FenceSink, MemEntry, Resource3d, Transfer3d,
+    Backend3d, BackendError, Blob, Box3d, FenceId, FenceSink, MemEntry, Resource3d, ShmMapper,
+    Transfer3d,
 };
 use crate::edid::{self, DisplayMode};
 use crate::scanout::{Frame, Mailbox, PixelFormat};
@@ -63,6 +65,7 @@ const RESP_OK_NODATA: u32 = 0x1100;
 const RESP_OK_DISPLAY_INFO: u32 = 0x1101;
 const RESP_OK_CAPSET_INFO: u32 = 0x1102;
 const RESP_OK_CAPSET: u32 = 0x1103;
+const RESP_OK_MAP_INFO: u32 = 0x1106;
 const RESP_OK_EDID: u32 = 0x1104;
 const RESP_ERR_UNSPEC: u32 = 0x1200;
 const RESP_ERR_OUT_OF_MEMORY: u32 = 0x1201;
@@ -76,6 +79,9 @@ const FLAG_FENCE: u32 = 1;
 const FLAG_INFO_RING_IDX: u32 = 2;
 /// Смещение `ring_idx` в заголовке.
 const HDR_RING_IDX: usize = 20;
+/// Номер области общей памяти host-visible (`VIRTIO_GPU_SHM_ID_HOST_VISIBLE`).
+const SHM_ID_HOST_VISIBLE: u8 = 1;
+const PAGE: u64 = 4096;
 /// Длина имени контекста в `CTX_CREATE`.
 const CTX_NAME_LEN: usize = 64;
 const HDR: usize = 24;
@@ -136,6 +142,31 @@ struct PendingFence {
     fence: FenceId,
 }
 
+/// Область общей памяти и отображённые в неё blob: ресурс → (смещение, длина).
+struct Shm {
+    size: u64,
+    mapper: Arc<dyn ShmMapper>,
+    mapped: HashMap<u32, (u64, u64)>,
+}
+
+impl Shm {
+    fn unmap(&mut self, id: u32) -> bool {
+        match self.mapped.remove(&id) {
+            Some((offset, len)) => {
+                self.mapper.unmap(offset, len);
+                true
+            }
+            None => false,
+        }
+    }
+
+    fn unmap_all(&mut self) {
+        for (_, (offset, len)) in self.mapped.drain() {
+            self.mapper.unmap(offset, len);
+        }
+    }
+}
+
 /// Состояние 3D-части.
 struct ThreeD {
     backend: Box<dyn Backend3d>,
@@ -143,6 +174,58 @@ struct ThreeD {
     contexts: HashSet<u32>,
     resources: HashMap<u32, Res3d>,
     pending: Vec<PendingFence>,
+    shm: Option<Shm>,
+}
+
+impl ThreeD {
+    /// Снимает отображение blob в госте и на хосте, если оно есть.
+    fn unmap_blob(&mut self, id: u32) -> bool {
+        let was = self.shm.as_mut().is_some_and(|s| s.unmap(id));
+        if was {
+            self.backend.unmap_blob(id);
+        }
+        was
+    }
+
+    /// `RESOURCE_MAP_BLOB`: blob по смещению `offset` области. Возвращает `map_info`.
+    fn map_blob(&mut self, id: u32, offset: u64) -> Result<u32, u32> {
+        let Some(shm) = self.shm.as_mut() else {
+            return Err(RESP_ERR_UNSPEC);
+        };
+        if !self.resources.contains_key(&id) {
+            return Err(RESP_ERR_INVALID_RESOURCE_ID);
+        }
+        if shm.mapped.contains_key(&id) || !offset.is_multiple_of(PAGE) {
+            return Err(RESP_ERR_INVALID_PARAMETER);
+        }
+        let m = self.backend.map_blob(id).map_err(backend_status)?;
+        let len = m.size.div_ceil(PAGE) * PAGE;
+        let fits = offset.checked_add(len).is_some_and(|end| end <= shm.size);
+        let overlaps = shm
+            .mapped
+            .values()
+            .any(|&(o, l)| offset < o + l && o < offset + len);
+        if len == 0 || !fits || overlaps || !m.ptr.addr().get().is_multiple_of(PAGE as usize) {
+            tracing::debug!(
+                id,
+                offset,
+                size = m.size,
+                "blob нельзя отобразить в эту область"
+            );
+            self.backend.unmap_blob(id);
+            return Err(RESP_ERR_INVALID_PARAMETER);
+        }
+        // SAFETY: память blob выделена бэкендом и остаётся выделенной, пока мы не вызовем
+        // backend.unmap_blob/resource_unref — а это делается только после mapper.unmap
+        // (Shm::unmap, unmap_all в reset и Drop устройства).
+        if let Err(e) = unsafe { shm.mapper.map(offset, m.ptr, len) } {
+            tracing::warn!(id, offset, len, error = %e, "blob не отображён в гостя");
+            self.backend.unmap_blob(id);
+            return Err(RESP_ERR_UNSPEC);
+        }
+        shm.mapped.insert(id, (offset, len));
+        Ok(m.map_info)
+    }
 }
 
 fn backend_status(e: BackendError) -> u32 {
@@ -267,8 +350,23 @@ impl VirtioGpu {
             contexts: HashSet::new(),
             resources: HashMap::new(),
             pending: Vec::new(),
+            shm: None,
         });
         gpu
+    }
+
+    /// Добавляет область общей памяти `size` байт (степень двойки) для host-visible blob.
+    /// Без 3D-бэкенда ничего не делает.
+    #[must_use]
+    pub fn with_shm(mut self, size: u64, mapper: Arc<dyn ShmMapper>) -> Self {
+        if let Some(t) = self.three_d.as_mut() {
+            t.shm = Some(Shm {
+                size,
+                mapper,
+                mapped: HashMap::new(),
+            });
+        }
+        self
     }
 
     /// Собирает читаемую часть запроса в `self.req`.
@@ -659,13 +757,28 @@ impl VirtioGpu {
                 }
                 RESP_OK_NODATA
             }
-            CMD_RESOURCE_MAP_BLOB | CMD_RESOURCE_UNMAP_BLOB => {
-                // Нужна shm-область PCI (host-visible память); пока её нет, гость не должен
-                // присылать эти команды: без shm-области ядро не создаёт host-visible blob.
-                return Some(RESP_ERR_UNSPEC);
+            CMD_RESOURCE_MAP_BLOB => match t.map_blob(res_arg, u64_at(req, b + 8)) {
+                Ok(info) => {
+                    begin_response(req, resp, RESP_OK_MAP_INFO);
+                    resp.extend_from_slice(&info.to_le_bytes());
+                    resp.extend_from_slice(&[0; 4]);
+                    RESP_OK_MAP_INFO
+                }
+                Err(status) => return Some(status),
+            },
+            CMD_RESOURCE_UNMAP_BLOB => {
+                if !t.resources.contains_key(&res_arg) {
+                    return Some(RESP_ERR_INVALID_RESOURCE_ID);
+                }
+                if !t.unmap_blob(res_arg) {
+                    return Some(RESP_ERR_INVALID_PARAMETER);
+                }
+                RESP_OK_NODATA
             }
             // Команды над ресурсами, общие для 2D и 3D: здесь — только для 3D-ресурсов.
-            CMD_RESOURCE_UNREF if t.resources.remove(&res_arg).is_some() => {
+            CMD_RESOURCE_UNREF if t.resources.contains_key(&res_arg) => {
+                t.unmap_blob(res_arg);
+                t.resources.remove(&res_arg);
                 t.backend.resource_unref(res_arg);
                 if *scanout_resource == Some(res_arg) {
                     *scanout_resource = None;
@@ -880,6 +993,16 @@ fn read_backing(
     out.is_empty()
 }
 
+impl Drop for VirtioGpu {
+    fn drop(&mut self) {
+        // Гость не должен видеть память blob после того, как бэкенд её освободит: снимаем
+        // отображения до удаления бэкенда (поля удаляются после этого).
+        if let Some(shm) = self.three_d.as_mut().and_then(|t| t.shm.as_mut()) {
+            shm.unmap_all();
+        }
+    }
+}
+
 impl VirtioDevice for VirtioGpu {
     fn device_type(&self) -> u32 {
         TYPE_GPU
@@ -900,6 +1023,13 @@ impl VirtioDevice for VirtioGpu {
         &self.sizes
     }
 
+    fn shared_memory_region(&self) -> Option<(u8, u64)> {
+        self.three_d
+            .as_ref()
+            .and_then(|t| t.shm.as_ref())
+            .map(|s| (SHM_ID_HOST_VISIBLE, s.size))
+    }
+
     fn read_config(&self, offset: u64, data: &mut [u8]) {
         // events_read, events_clear, num_scanouts, num_capsets
         let mut cfg = [0_u8; 16];
@@ -917,6 +1047,9 @@ impl VirtioDevice for VirtioGpu {
         self.resource_bytes = 0;
         self.scanout_resource = None;
         if let Some(t) = self.three_d.as_mut() {
+            if let Some(shm) = t.shm.as_mut() {
+                shm.unmap_all();
+            }
             for (id, _) in t.resources.drain() {
                 t.backend.resource_unref(id);
             }
@@ -1059,7 +1192,7 @@ mod tests {
 
     use std::sync::Mutex;
 
-    use crate::backend::{BackendResult, CapsetInfo};
+    use crate::backend::{BackendResult, BlobMapping, CapsetInfo};
 
     /// Заглушка бэкенда: записывает вызовы, фенсы выполняет только по команде теста.
     #[derive(Default)]
@@ -1182,6 +1315,23 @@ mod tests {
             ));
             Ok(())
         }
+        fn map_blob(&mut self, id: u32) -> BackendResult<BlobMapping> {
+            self.push(format!("map {id}"));
+            // Ресурс 13 — «невыровненная» память хоста; 14 — не host-visible.
+            let addr = match id {
+                13 => 0x1_0010,
+                14 => return Err(BackendError::InvalidParameter),
+                _ => 0x10_0000 * id as usize,
+            };
+            Ok(BlobMapping {
+                ptr: std::ptr::NonNull::new(std::ptr::without_provenance_mut(addr)).unwrap(),
+                size: 5000,
+                map_info: 3,
+            })
+        }
+        fn unmap_blob(&mut self, id: u32) {
+            self.push(format!("unmap {id}"));
+        }
         fn read_pixels(&mut self, id: u32, w: u32, h: u32, out: &mut [u8]) -> BackendResult {
             self.push(format!("read {id} {w}x{h}"));
             out.fill(0x5A);
@@ -1278,6 +1428,170 @@ mod tests {
         let mut n = name.as_bytes().to_vec();
         n.resize(64, 0);
         (vec![name.len() as u32, init], n)
+    }
+
+    /// Заглушка отображения: пишет вызовы в общий журнал.
+    struct MockShm(Arc<Mutex<Vec<String>>>);
+    impl ShmMapper for MockShm {
+        unsafe fn map(
+            &self,
+            offset: u64,
+            host: std::ptr::NonNull<u8>,
+            len: u64,
+        ) -> Result<(), String> {
+            self.0.lock().unwrap().push(format!(
+                "shm map 0x{offset:x} {:x} {len}",
+                host.as_ptr() as usize
+            ));
+            Ok(())
+        }
+        fn unmap(&self, offset: u64, len: u64) {
+            self.0
+                .lock()
+                .unwrap()
+                .push(format!("shm unmap 0x{offset:x} {len}"));
+        }
+    }
+
+    impl Harness3d {
+        fn with_shm() -> Self {
+            let mut t = Self::new();
+            let mode = t.h.gpu.mode;
+            let gpu = std::mem::replace(&mut t.h.gpu, VirtioGpu::new(mode, t.h.mailbox.clone()));
+            t.h.gpu = gpu.with_shm(1 << 20, Arc::new(MockShm(Arc::clone(&t.log))));
+            t
+        }
+
+        fn blob(&mut self, id: u32) {
+            self.ok(
+                CMD_RESOURCE_CREATE_BLOB,
+                1,
+                &[id, 2, 1, 0, id, 0, 4096, 0],
+                &[],
+            );
+        }
+    }
+
+    #[test]
+    fn map_blob_into_shared_memory() {
+        let mut t = Harness3d::with_shm();
+        assert_eq!(t.h.gpu.shared_memory_region(), Some((1, 1 << 20)));
+        let (body, name) = ctx_create_body("vk", 3);
+        t.ok(CMD_CTX_CREATE, 1, &body, &name);
+        t.blob(5);
+        t.log();
+        // MAP_BLOB: resource 5, padding, offset 0x2000 (u64).
+        let r = t.cmd(CMD_RESOURCE_MAP_BLOB, 1, &[5, 0, 0x2000, 0], &[], 32);
+        assert_eq!(resp_type(&r), RESP_OK_MAP_INFO);
+        assert_eq!(u32_at(&r, 24), 3);
+        // Повторно и с перекрытием — нельзя; размер округлён до страниц (5000 → 8192).
+        t.blob(6);
+        assert_eq!(
+            resp_type(&t.cmd(CMD_RESOURCE_MAP_BLOB, 1, &[5, 0, 0x8000, 0], &[], 32)),
+            RESP_ERR_INVALID_PARAMETER
+        );
+        assert_eq!(
+            resp_type(&t.cmd(CMD_RESOURCE_MAP_BLOB, 1, &[6, 0, 0x3000, 0], &[], 32)),
+            RESP_ERR_INVALID_PARAMETER
+        );
+        // Невыровненное смещение и выход за область.
+        assert_eq!(
+            resp_type(&t.cmd(CMD_RESOURCE_MAP_BLOB, 1, &[6, 0, 0x4001, 0], &[], 32)),
+            RESP_ERR_INVALID_PARAMETER
+        );
+        assert_eq!(
+            resp_type(&t.cmd(CMD_RESOURCE_MAP_BLOB, 1, &[6, 0, 0xFF000, 0], &[], 32)),
+            RESP_ERR_INVALID_PARAMETER
+        );
+        assert_eq!(
+            resp_type(&t.cmd(CMD_RESOURCE_MAP_BLOB, 1, &[6, 0, 0x4000, 0], &[], 32)),
+            RESP_OK_MAP_INFO
+        );
+        t.ok(CMD_RESOURCE_UNMAP_BLOB, 1, &[5, 0], &[]);
+        assert_eq!(
+            resp_type(&t.cmd(CMD_RESOURCE_UNMAP_BLOB, 1, &[5, 0], &[], 24)),
+            RESP_ERR_INVALID_PARAMETER
+        );
+        // UNREF отображённого blob сначала снимает отображение.
+        t.ok(CMD_RESOURCE_UNREF, 0, &[6, 0], &[]);
+        assert_eq!(
+            t.log(),
+            vec![
+                "map 5",
+                "shm map 0x2000 500000 8192",
+                "blob 6 ctx1 mem2 flags1 id6 size4096 entries0",
+                // Перекрытие с blob 5 (0x2000..0x4000).
+                "map 6",
+                "unmap 6",
+                // Выход за область; невыровненное смещение отклонено до бэкенда.
+                "map 6",
+                "unmap 6",
+                "map 6",
+                "shm map 0x4000 600000 8192",
+                "shm unmap 0x2000 8192",
+                "unmap 5",
+                "shm unmap 0x4000 8192",
+                "unmap 6",
+                "unref 6",
+            ]
+        );
+    }
+
+    #[test]
+    fn map_blob_rejects_unaligned_host_memory_and_unmappable_blobs() {
+        let mut t = Harness3d::with_shm();
+        let (body, name) = ctx_create_body("vk", 3);
+        t.ok(CMD_CTX_CREATE, 1, &body, &name);
+        t.blob(13);
+        t.blob(14);
+        t.log();
+        assert_eq!(
+            resp_type(&t.cmd(CMD_RESOURCE_MAP_BLOB, 1, &[13, 0, 0, 0], &[], 32)),
+            RESP_ERR_INVALID_PARAMETER
+        );
+        assert_eq!(
+            resp_type(&t.cmd(CMD_RESOURCE_MAP_BLOB, 1, &[14, 0, 0, 0], &[], 32)),
+            RESP_ERR_INVALID_PARAMETER
+        );
+        assert_eq!(t.log(), vec!["map 13", "unmap 13", "map 14"]);
+    }
+
+    #[test]
+    fn shared_memory_is_unmapped_on_reset_and_drop() {
+        let mut t = Harness3d::with_shm();
+        let (body, name) = ctx_create_body("vk", 3);
+        t.ok(CMD_CTX_CREATE, 1, &body, &name);
+        t.blob(5);
+        t.cmd(CMD_RESOURCE_MAP_BLOB, 1, &[5, 0, 0, 0], &[], 32);
+        t.log();
+        t.h.gpu.reset();
+        let log = t.log();
+        assert_eq!(log.first().map(String::as_str), Some("shm unmap 0x0 8192"));
+        t.blob(5);
+        t.cmd(CMD_RESOURCE_MAP_BLOB, 1, &[5, 0, 0, 0], &[], 32);
+        t.log();
+        let mode = t.h.gpu.mode;
+        drop(std::mem::replace(
+            &mut t.h.gpu,
+            VirtioGpu::new(mode, t.h.mailbox.clone()),
+        ));
+        assert_eq!(
+            t.log().first().map(String::as_str),
+            Some("shm unmap 0x0 8192")
+        );
+    }
+
+    #[test]
+    fn map_blob_without_shared_memory_fails() {
+        let mut t = Harness3d::new();
+        assert_eq!(t.h.gpu.shared_memory_region(), None);
+        let (body, name) = ctx_create_body("vk", 3);
+        t.ok(CMD_CTX_CREATE, 1, &body, &name);
+        t.blob(5);
+        assert_eq!(
+            resp_type(&t.cmd(CMD_RESOURCE_MAP_BLOB, 1, &[5, 0, 0, 0], &[], 32)),
+            RESP_ERR_UNSPEC
+        );
     }
 
     #[test]
@@ -1435,10 +1749,6 @@ mod tests {
         assert_eq!(
             resp_type(&t.cmd(CMD_RESOURCE_UNREF, 0, &[42, 0], &[], 24)),
             RESP_ERR_INVALID_RESOURCE_ID
-        );
-        assert_eq!(
-            resp_type(&t.cmd(CMD_RESOURCE_MAP_BLOB, 1, &[1, 0, 0, 0], &[], 24)),
-            RESP_ERR_UNSPEC
         );
     }
 

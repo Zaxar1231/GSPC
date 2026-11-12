@@ -7,6 +7,7 @@
 //! Фенсы асинхронные: бэкенд сообщает о выполненном фенсе через [`FenceSink::signal`] из любого
 //! потока, устройство при следующей обработке очереди возвращает гостю придержанные команды.
 
+use std::ptr::NonNull;
 use std::sync::{Arc, Mutex, PoisonError};
 
 use rustdroid_virtio::GuestMemory;
@@ -134,6 +135,34 @@ impl FenceId {
     }
 }
 
+/// Blob, отображённый в адресное пространство хоста.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BlobMapping {
+    /// Начало (выровнено на страницу — иначе его нельзя отобразить в гостя).
+    pub ptr: NonNull<u8>,
+    /// Размер в байтах.
+    pub size: u64,
+    /// Кэшируемость для гостя (`VIRTIO_GPU_MAP_CACHE_*`).
+    pub map_info: u32,
+}
+
+/// Отображение памяти хоста в область общей памяти гостя (BAR2 virtio-gpu).
+///
+/// В VMM — `WHvMapGpaRange` по адресу `база BAR2 + offset`; в тестах — запись вызовов.
+pub trait ShmMapper: Send + Sync {
+    /// Отображает `len` байт с адреса хоста `host` по смещению `offset` области.
+    ///
+    /// # Safety
+    /// Память `[host, host + len)` должна оставаться выделенной до [`Self::unmap`].
+    ///
+    /// # Errors
+    /// Гипервизор отказал (адрес не выровнен, занято и т. п.).
+    unsafe fn map(&self, offset: u64, host: NonNull<u8>, len: u64) -> Result<(), String>;
+
+    /// Снимает отображение.
+    fn unmap(&self, offset: u64, len: u64);
+}
+
 /// Ошибка бэкенда; устройство переводит её в код ответа virtio-gpu.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum BackendError {
@@ -238,6 +267,16 @@ pub trait Backend3d: Send {
     /// # Errors
     /// Ошибка бэкенда.
     fn create_fence(&mut self, fence: FenceId) -> BackendResult;
+
+    /// Отображает blob-ресурс в память хоста (для `RESOURCE_MAP_BLOB`). Память остаётся
+    /// выделенной до [`Self::unmap_blob`] или [`Self::resource_unref`].
+    ///
+    /// # Errors
+    /// Ресурс нельзя отобразить (не host-visible).
+    fn map_blob(&mut self, resource_id: u32) -> BackendResult<BlobMapping>;
+
+    /// Снимает отображение blob в памяти хоста.
+    fn unmap_blob(&mut self, resource_id: u32);
 
     /// Читает пиксели ресурса (RGBA/BGRA, шаг `width * 4`) для показа в окне.
     ///

@@ -125,6 +125,16 @@ impl DeviceWorker {
         })
     }
 
+    /// Функция, которая будит обработку очереди из любого потока (фенсы gfxstream).
+    pub fn kicker(&self, queue: usize) -> impl Fn() + Send + Sync + 'static {
+        let events = Arc::clone(&self.queue_events);
+        move || {
+            if let Some(ev) = events.get(queue) {
+                ev.set();
+            }
+        }
+    }
+
     /// Будит обработку очереди (например, при новом вводе консоли).
     pub fn kick(&self, queue: usize) {
         if let Some(ev) = self.queue_events.get(queue) {
