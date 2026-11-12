@@ -48,6 +48,10 @@
 
 ### Fixed
 
+- `hw-test.ps1`: этап 3 без этапа 2 запускался на старом инстансе `hwtest` без `--reset`. После
+  аварийно завершённых прогонов на `/metadata/aconfig` оставались пустые файлы флагов, и
+  system_server падал по кругу с `Invalid feature flag`. Теперь этап 3 сбрасывает инстанс, если
+  этап 2 не запускался.
 - gfxstream падал при запуске на Intel UHD (драйвер Intel под Windows): пул дескрипторов
   Vulkan-композитора был меньше нужного (`VK_ERROR_OUT_OF_POOL_MEMORY`), патч
   `0002-compositor-descriptor-pool-size.patch`.

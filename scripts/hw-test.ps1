@@ -593,9 +593,13 @@ if ($Stages -contains 3 -and $images -and (Test-Path $Exe)) {
         try { $null = [RdShot]::Capture($p.MainWindowHandle, $png) } catch { }
     }
     $stage3Start = Get-Date
-    $rc = Run-Vm 'stage3' @('boot-android', '--images', $images, '--instance', 'hwtest',
+    $stage3Args = @('boot-android', '--images', $images, '--instance', 'hwtest',
         '--memory', "$Memory", '--cpus', "$Cpus", '--display', $Display, '--timeout', "$Stage3Seconds",
-        '--gpu', $gpuMode, '--serial-log', $serial, '--logcat', (Join-Path $Out 'stage3-logcat.txt'), '-v') $Stage3Seconds $snap
+        '--gpu', $gpuMode, '--serial-log', $serial, '--logcat', (Join-Path $Out 'stage3-logcat.txt'), '-v')
+    # Без этапа 2 инстанс не сбрасывался: после аварийно завершённых прогонов на /metadata
+    # оставались пустые файлы флагов aconfig, и system_server падал по кругу.
+    if ($Stages -notcontains 2) { $stage3Args += '--reset' }
+    $rc = Run-Vm 'stage3' $stage3Args $Stage3Seconds $snap
     Say "  код выхода: $rc"
     "stage3 gpu: $gpuMode" | Add-Content -Path (Join-Path $Out 'system.txt') -Encoding UTF8
     Ok "stage3: графика $gpuMode"
