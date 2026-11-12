@@ -1,0 +1,86 @@
+name: gfxstream
+
+# Сборка хостовой части gfxstream (gfxstream_backend.dll) под Windows из зафиксированного коммита
+# github.com/google/gfxstream (Apache-2.0). Результат публикуется в pre-release `deps-gfxstream`:
+# сборка RustDroid и hw-test.ps1 берут DLL оттуда, а не собирают её сами (это 20+ минут).
+# Версия меняется только здесь, в GFXSTREAM_COMMIT, отдельным коммитом.
+
+on:
+  push:
+    paths: [".github/workflows/gfxstream.yml"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: gfxstream
+  cancel-in-progress: false
+
+env:
+  GFXSTREAM_REPO: https://github.com/google/gfxstream
+  GFXSTREAM_COMMIT: e8377d0096fc9bb75d1fa28e7801a3daed4604f4
+
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 120
+    steps:
+      - name: Исходники gfxstream
+        shell: pwsh
+        run: |
+          git init gfxstream
+          git -C gfxstream remote add origin $env:GFXSTREAM_REPO
+          git -C gfxstream fetch --depth 1 origin $env:GFXSTREAM_COMMIT
+          git -C gfxstream checkout --quiet FETCH_HEAD
+          git -C gfxstream log -1 --format='%H %cd %s'
+
+      - name: Конфигурация (CMake, ClangCL)
+        shell: pwsh
+        run: |
+          cmake -S gfxstream -B build -G "Visual Studio 17 2022" -A x64 -T ClangCL `
+            -DBUILD_STANDALONE=ON -DENABLE_VKCEREAL_TESTS=OFF
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Сборка gfxstream_backend
+        shell: pwsh
+        run: |
+          cmake --build build --config Release --target gfxstream_backend --parallel
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Get-ChildItem build -Recurse -Include gfxstream_backend*.dll, gfxstream_backend*.pdb |
+            Select-Object FullName, Length | Format-Table -AutoSize
+
+      - name: Упаковка
+        shell: pwsh
+        run: |
+          $out = Join-Path $env:RUNNER_TEMP 'gfxstream'
+          New-Item -ItemType Directory -Force -Path $out | Out-Null
+          $dll = Get-ChildItem build -Recurse -Filter gfxstream_backend.dll | Select-Object -First 1
+          if (-not $dll) { Write-Error 'gfxstream_backend.dll не найдена'; exit 1 }
+          Copy-Item $dll.FullName $out
+          Copy-Item gfxstream/LICENSE (Join-Path $out 'gfxstream-LICENSE.txt')
+          Copy-Item gfxstream/host/include/gfxstream/virtio-gpu-gfxstream-renderer.h $out
+          Set-Content (Join-Path $out 'gfxstream-commit.txt') $env:GFXSTREAM_COMMIT -NoNewline
+          $hash = (Get-FileHash -Algorithm SHA256 (Join-Path $out 'gfxstream_backend.dll')).Hash.ToLower()
+          Set-Content (Join-Path $out 'gfxstream_backend.dll.sha256') $hash -NoNewline
+          Compress-Archive -Path (Join-Path $out '*') -DestinationPath (Join-Path $env:RUNNER_TEMP 'gfxstream-windows-x64.zip')
+          "sha256 $hash"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: gfxstream-windows-x64
+          path: ${{ runner.temp }}/gfxstream-windows-x64.zip
+
+      - name: Публикация в pre-release deps-gfxstream
+        if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/feat/')
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $tag = 'deps-gfxstream'
+          gh release delete $tag --cleanup-tag --yes 2>$null
+          $global:LASTEXITCODE = 0
+          gh release create $tag --prerelease --target '${{ github.sha }}' --title 'gfxstream (Windows x64)' `
+            --notes "gfxstream_backend.dll из google/gfxstream@$env:GFXSTREAM_COMMIT (Apache-2.0)." `
+            (Join-Path $env:RUNNER_TEMP 'gfxstream-windows-x64.zip')
+          if ($LASTEXITCODE -ne 0) { exit 1 }
