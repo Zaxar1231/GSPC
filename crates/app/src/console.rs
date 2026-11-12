@@ -1,4 +1,4 @@
-//! Запуск ВМ с консолью гостя в терминале Windows: `boot` и `boot-android`.
+//! Запуск ВМ: консоль гостя в терминале Windows и, с `--display`, окно с экраном гостя.
 
 use std::fs::File;
 use std::io::{Read, Write};
@@ -7,8 +7,10 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
+use rustdroid_devices::cf_services::{OemLock, SensorsControl, ServiceEndpoint};
 use rustdroid_devices::{
-    CompositeDisk, ConsoleInput, CowDisk, Disk, Partition, RawDisk, Serial16550, ZeroDisk,
+    CompositeDisk, ConsoleInput, CowDisk, Disk, Partition, RawDisk, Serial16550, SparseDisk,
+    ZeroDisk, open_image,
 };
 use rustdroid_instance::DataDirs;
 use rustdroid_instance::android::{
@@ -22,7 +24,8 @@ use windows::Win32::System::Console::{
     GetStdHandle, STD_INPUT_HANDLE, STD_OUTPUT_HANDLE, SetConsoleMode,
 };
 
-use crate::cli::{AndroidArgs, BootArgs, ConsoleKind, DiskSpec, VmArgs};
+use crate::cli::{AndroidArgs, BootArgs, ConsoleKind, DiskSpec, DisplaySpec, VmArgs};
+use crate::display;
 
 /// Префикс управляющих комбинаций (как в QEMU): Ctrl+A.
 const ESCAPE: u8 = 0x01;
@@ -164,6 +167,18 @@ fn spawn_input(target: InputTarget, stopper: Stopper) -> std::io::Result<()> {
     Ok(())
 }
 
+/// Останавливает ВМ через `secs` секунд (`--timeout`).
+fn spawn_timeout(secs: u64, stopper: Stopper) -> std::io::Result<()> {
+    std::thread::Builder::new()
+        .name("vm-timeout".into())
+        .spawn(move || {
+            std::thread::sleep(std::time::Duration::from_secs(secs));
+            tracing::info!(secs, "истёк --timeout, ВМ останавливается");
+            stopper.stop();
+        })?;
+    Ok(())
+}
+
 fn open_log(path: Option<&PathBuf>) -> Result<ConsoleOut> {
     let log = path
         .map(|p| File::create(p).with_context(|| format!("не удалось создать {}", p.display())))
@@ -172,7 +187,7 @@ fn open_log(path: Option<&PathBuf>) -> Result<ConsoleOut> {
     Ok(ConsoleOut { log })
 }
 
-fn base_config(vm: &VmArgs, kernel: PathBuf) -> VmConfig {
+fn base_config(vm: &VmArgs, console: ConsoleKind, kernel: PathBuf) -> VmConfig {
     VmConfig {
         kernel,
         initrd: None,
@@ -183,27 +198,46 @@ fn base_config(vm: &VmArgs, kernel: PathBuf) -> VmConfig {
         cmdline_override: None,
         large_pages: vm.large_pages,
         guest_hz: vm.guest_hz,
+        kernel_console: match console {
+            ConsoleKind::Serial => "ttyS0".into(),
+            ConsoleKind::Hvc => "hvc0".into(),
+        },
     }
 }
 
-fn run_vm(cfg: &VmConfig, mut devices: VmDevices, vm: &VmArgs) -> Result<()> {
+fn run_vm(cfg: &VmConfig, mut devices: VmDevices, vm: &VmArgs, console: ConsoleKind) -> Result<()> {
     let out = open_log(vm.serial_log.as_ref())?;
-    if vm.console == ConsoleKind::Hvc {
+    if console == ConsoleKind::Hvc {
         devices.console = Some((Box::new(out.clone()), Arc::new(ConsoleInput::default())));
     }
+    let display = vm
+        .display
+        .as_deref()
+        .map(DisplaySpec::parse)
+        .transpose()
+        .map_err(anyhow::Error::msg)?;
+    let screen = display.map(|d| display::attach(&mut devices, d));
+
     let machine = Vm::new(cfg, devices, Box::new(out)).context("не удалось создать ВМ")?;
     tracing::info!(cmdline = machine.cmdline(), "командная строка ядра");
-    tracing::info!("Консоль гостя ниже. Выход: Ctrl+A, затем X.");
+    tracing::info!("Консоль гостя ниже. Выход: Ctrl+A, затем X (или закройте окно).");
 
-    let target = match (vm.console, machine.console()) {
+    let target = match (console, machine.console()) {
         (ConsoleKind::Hvc, Some(h)) => InputTarget::Hvc(h),
         _ => InputTarget::Serial(machine.serial()),
     };
     let raw = RawConsole::enable();
     spawn_input(target, machine.stopper()).context("не удалось запустить поток ввода")?;
-    let (outcome, stats) = machine.run().context("ошибка выполнения ВМ")?;
+    if vm.timeout > 0 {
+        spawn_timeout(vm.timeout, machine.stopper()).context("не удалось запустить таймер")?;
+    }
+    let result = match screen {
+        Some(screen) => display::run(machine, screen, vm),
+        None => machine.run().map_err(anyhow::Error::from),
+    };
     drop(raw);
     let _ = writeln!(std::io::stdout());
+    let (outcome, stats) = result.context("ошибка выполнения ВМ")?;
     match outcome {
         RunOutcome::Reset => {
             tracing::info!(exits = stats.total(), "гость перезагрузился или выключился")
@@ -217,19 +251,24 @@ fn run_vm(cfg: &VmConfig, mut devices: VmDevices, vm: &VmArgs) -> Result<()> {
 
 fn open_disk(spec: &DiskSpec) -> Result<Arc<dyn Disk>> {
     let read_only = spec.read_only || spec.overlay.is_some();
-    let raw = RawDisk::open(&spec.path, read_only)
-        .with_context(|| format!("не удалось открыть {}", spec.path.display()))?;
+    let open_err = || format!("не удалось открыть {}", spec.path.display());
+    // Sparse-образ читается только через индекс; писать в него можно через `cow=`.
+    let base: Box<dyn Disk> = if SparseDisk::is_sparse(&spec.path).with_context(open_err)? {
+        Box::new(SparseDisk::open(&spec.path).with_context(open_err)?)
+    } else {
+        Box::new(RawDisk::open(&spec.path, read_only).with_context(open_err)?)
+    };
     Ok(match &spec.overlay {
-        Some(o) => Arc::new(
-            CowDisk::open(Box::new(raw), o).with_context(|| format!("оверлей {}", o.display()))?,
-        ),
-        None => Arc::new(raw),
+        Some(o) => {
+            Arc::new(CowDisk::open(base, o).with_context(|| format!("оверлей {}", o.display()))?)
+        }
+        None => Arc::from(base),
     })
 }
 
 /// `rustdroid boot`.
 pub(crate) fn boot(args: &BootArgs) -> Result<()> {
-    let mut cfg = base_config(&args.vm, args.kernel.clone());
+    let mut cfg = base_config(&args.vm, args.vm.console, args.kernel.clone());
     cfg.initrd.clone_from(&args.initrd);
     cfg.cmdline_override.clone_from(&args.cmdline);
     let mut devices = VmDevices::default();
@@ -240,7 +279,7 @@ pub(crate) fn boot(args: &BootArgs) -> Result<()> {
             open_disk(&spec)?,
         ));
     }
-    run_vm(&cfg, devices, &args.vm)
+    run_vm(&cfg, devices, &args.vm, args.vm.console)
 }
 
 fn read(path: &Path) -> Result<Vec<u8>> {
@@ -293,10 +332,9 @@ pub(crate) fn boot_android(args: &AndroidArgs) -> Result<()> {
     let mut parts = Vec::new();
     for p in partition_plan(dir)? {
         let base: Box<dyn Disk> = match &p.image {
-            Some(img) => Box::new(
-                RawDisk::open(img, true)
-                    .with_context(|| format!("не удалось открыть {}", img.display()))?,
-            ),
+            Some(img) => {
+                open_image(img).with_context(|| format!("не удалось открыть {}", img.display()))?
+            }
             None => Box::new(ZeroDisk(p.empty_size)),
         };
         let cow = CowDisk::open(base, &overlays.join(format!("{}.rdcow", p.name)))
@@ -311,24 +349,42 @@ pub(crate) fn boot_android(args: &AndroidArgs) -> Result<()> {
         tracing::debug!(partition = %name, start, mib = span >> 20, "раздел");
     }
 
+    // Консоль Android — всегда virtio-console hvc0: вывод пачками, без выхода vCPU на каждый
+    // байт, и нумерация hvcN совпадает с Cuttlefish (HAL ждут свои порты на hvc2…hvc19).
     // Диск — первое устройство PCI: 00:01.0.
-    let console = match args.vm.console {
-        ConsoleKind::Serial => "ttyS0",
-        ConsoleKind::Hvc => "hvc0",
-    };
-    let bootconfig =
-        rustdroid_bootconfig(&vendor_img.bootconfig, "pci0000:00/0000:00:01.0", console);
+    let mut bootconfig =
+        rustdroid_bootconfig(&vendor_img.bootconfig, "pci0000:00/0000:00:01.0", "hvc0");
+    if let Some(spec) = args.vm.display.as_deref() {
+        // Программный рендер в госте (SwiftShader/ANGLE) и композитор через DRM virtio-gpu.
+        for (k, v) in display::GUEST_SWIFTSHADER {
+            bootconfig.set(k, v);
+        }
+        // Частота vsync композитора ranchu — частота дисплея гостя.
+        if let Ok(d) = DisplaySpec::parse(spec) {
+            bootconfig.set("androidboot.qemu.vsync", &d.refresh_hz.to_string());
+        }
+    }
+    for kv in &args.bootconfig {
+        let (k, v) = kv
+            .split_once('=')
+            .with_context(|| format!("--set ожидает КЛЮЧ=ЗНАЧЕНИЕ, получено {kv}"))?;
+        bootconfig.set(k.trim(), v.trim());
+    }
     let mut initrd = Vec::with_capacity(vendor_img.ramdisk.len() + generic_ramdisk.len() + 4096);
     initrd.extend_from_slice(vendor_img.ramdisk);
     initrd.extend_from_slice(generic_ramdisk);
     let initrd = append_bootconfig(initrd, &bootconfig.render());
 
-    let mut cfg = base_config(&args.vm, kernel);
+    let mut cfg = base_config(&args.vm, ConsoleKind::Hvc, kernel);
     cfg.initrd_data = Some(Arc::new(initrd));
+    let needs_bootconfig = !vendor_img
+        .cmdline
+        .split_whitespace()
+        .any(|p| p == "bootconfig");
     cfg.cmdline_extra = [
         vendor_img.cmdline.as_str(),
         boot_img.cmdline.as_str(),
-        "bootconfig",
+        if needs_bootconfig { "bootconfig" } else { "" },
         args.vm.append.as_str(),
     ]
     .iter()
@@ -338,9 +394,52 @@ pub(crate) fn boot_android(args: &AndroidArgs) -> Result<()> {
     .join(" ");
     tracing::info!(images = %dir.display(), instance = %args.instance, "загрузка Android");
 
+    // hvc1…hvc19 как у Cuttlefish; в hvc2 Android пишет logcat (служба seriallogging).
+    let logcat_path = args
+        .logcat
+        .clone()
+        .unwrap_or_else(|| instance_dir.join("logcat.txt"));
+    let logcat = File::create(&logcat_path)
+        .with_context(|| format!("не удалось создать {}", logcat_path.display()))?;
+    tracing::info!(path = %logcat_path.display(), "logcat гостя");
+    let mut logcat = Some(logcat);
+    let extra_consoles = (1..CUTTLEFISH_CONSOLES)
+        .map(|n| {
+            let input = Arc::new(ConsoleInput::default());
+            let out: Box<dyn Write + Send> = match n {
+                LOGCAT_HVC => match logcat.take() {
+                    Some(f) => Box::new(f),
+                    None => Box::new(std::io::sink()),
+                },
+                SENSORS_CONTROL_HVC => Box::new(ServiceEndpoint::new(
+                    SensorsControl::default(),
+                    Arc::clone(&input),
+                )),
+                OEMLOCK_HVC => {
+                    Box::new(ServiceEndpoint::new(OemLock::default(), Arc::clone(&input)))
+                }
+                _ => Box::new(std::io::sink()),
+            };
+            (format!("hvc{n}"), out, input)
+        })
+        .collect();
+
     let devices = VmDevices {
         disks: vec![("android".into(), Arc::new(disk))],
-        console: None,
+        extra_consoles,
+        vsock_cid: Some(GUEST_CID),
+        ..VmDevices::default()
     };
-    run_vm(&cfg, devices, &args.vm)
+    run_vm(&cfg, devices, &args.vm, ConsoleKind::Hvc)
 }
+
+/// Число консолей virtio у Cuttlefish: hvc0…hvc19.
+const CUTTLEFISH_CONSOLES: u32 = 20;
+/// Консоль с logcat.
+const LOGCAT_HVC: u32 = 2;
+/// Консоль HAL oemlock.
+const OEMLOCK_HVC: u32 = 10;
+/// Управляющий канал HAL датчиков (`hvc19` — данные, хост пока ничего не шлёт).
+const SENSORS_CONTROL_HVC: u32 = 18;
+/// CID гостя virtio-vsock.
+const GUEST_CID: u64 = 3;

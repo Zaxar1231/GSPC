@@ -5,8 +5,9 @@ use std::sync::Arc;
 
 use windows::Win32::Foundation::HANDLE;
 use windows::Win32::System::Hypervisor::{
-    WHV_DOORBELL_MATCH_DATA, WHV_INTERRUPT_CONTROL, WHV_MAP_GPA_RANGE_FLAGS, WHV_PARTITION_HANDLE,
-    WHV_PARTITION_PROPERTY_CODE, WHvPartitionPropertyCodeCpuidExitList,
+    WHV_DOORBELL_MATCH_DATA, WHV_EXTENDED_VM_EXITS, WHV_INTERRUPT_CONTROL, WHV_MAP_GPA_RANGE_FLAGS,
+    WHV_PARTITION_HANDLE, WHV_PARTITION_PROPERTY_CODE, WHvPartitionPropertyCodeCpuidExitList,
+    WHvPartitionPropertyCodeExceptionExitBitmap, WHvPartitionPropertyCodeExtendedVmExits,
     WHvPartitionPropertyCodeLocalApicEmulationMode, WHvPartitionPropertyCodeProcessorCount,
     WHvX64LocalApicEmulationModeXApic,
 };
@@ -113,6 +114,9 @@ pub struct PartitionConfig {
     pub processor_count: u32,
     /// Листы CPUID, для которых нужен выход в user mode.
     pub cpuid_exits: Vec<u32>,
+    /// Выход по `#UD` (неизвестная инструкция): для программной эмуляции инструкций, которых
+    /// нет у CPU хоста (например, `MOVBE` на Ivy Bridge).
+    pub intercept_invalid_opcode: bool,
 }
 
 /// Партиция WHPX. Разделяется между потоками vCPU и устройств через [`Arc`].
@@ -166,6 +170,29 @@ impl Partition {
             &WHvX64LocalApicEmulationModeXApic,
             "SetPartitionProperty(LocalApicEmulationMode)",
         )?;
+        // WHV_EXTENDED_VM_EXITS: бит 0 — X64CpuidExit (выходы по листам из CpuidExitList),
+        // бит 2 — ExceptionExit (выходы по исключениям из ExceptionExitBitmap).
+        let exit_bits = u64::from(!config.cpuid_exits.is_empty())
+            | (u64::from(config.intercept_invalid_opcode) << 2);
+        if exit_bits != 0 {
+            let exits = WHV_EXTENDED_VM_EXITS {
+                AsUINT64: exit_bits,
+            };
+            partition.set_property(
+                WHvPartitionPropertyCodeExtendedVmExits,
+                &exits,
+                "SetPartitionProperty(ExtendedVmExits)",
+            )?;
+        }
+        if config.intercept_invalid_opcode {
+            // Бит вектора #UD (6).
+            let bitmap: u64 = 1 << 6;
+            partition.set_property(
+                WHvPartitionPropertyCodeExceptionExitBitmap,
+                &bitmap,
+                "SetPartitionProperty(ExceptionExitBitmap)",
+            )?;
+        }
         if !config.cpuid_exits.is_empty() {
             partition.set_property_slice(
                 WHvPartitionPropertyCodeCpuidExitList,
@@ -273,6 +300,43 @@ impl Partition {
         check("WHvCancelRunVirtualProcessor", unsafe {
             (self.api.cancel_run_vp)(self.handle, index, 0)
         })
+    }
+
+    /// Сколько vCPU `index` проработал с создания, в единицах по 100 нс
+    /// (`WHvProcessorCounterSetRuntime.TotalRuntime100ns`). Время исполнения кода гостя
+    /// Windows не засчитывает ни процессу, ни системе, поэтому загрузку vCPU видно только так.
+    ///
+    /// # Errors
+    /// Ошибка WHPX.
+    pub fn vcpu_runtime_100ns(&self, index: u32) -> Result<u64> {
+        /// `WHV_PROCESSOR_RUNTIME_COUNTERS`.
+        #[repr(C)]
+        #[derive(Default)]
+        struct RuntimeCounters {
+            total_runtime_100ns: u64,
+            hypervisor_runtime_100ns: u64,
+        }
+        /// `WHvProcessorCounterSetRuntime`.
+        const COUNTER_SET_RUNTIME: i32 = 0;
+        let mut counters = RuntimeCounters::default();
+        let mut written = 0_u32;
+        #[allow(
+            clippy::cast_possible_truncation,
+            reason = "размер структуры — 16 байт"
+        )]
+        let size = size_of::<RuntimeCounters>() as u32;
+        // SAFETY: дескриптор валиден, буфер локальный и нужного размера.
+        check("WHvGetVirtualProcessorCounters", unsafe {
+            (self.api.get_vp_counters)(
+                self.handle,
+                index,
+                COUNTER_SET_RUNTIME,
+                (&raw mut counters).cast(),
+                size,
+                &raw mut written,
+            )
+        })?;
+        Ok(counters.total_runtime_100ns)
     }
 
     /// Регистрирует doorbell: запись гостя по `gpa` сигналит `event` без выхода vCPU в user

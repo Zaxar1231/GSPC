@@ -15,9 +15,11 @@
 //! `host` (P-ядра, MMCSS).
 
 pub mod acpi;
+pub mod aesni;
 pub mod boot_cpu;
 pub mod cmdline;
 mod error;
+pub mod insn;
 pub mod ioapic;
 pub mod layout;
 pub mod loader;
@@ -34,4 +36,4 @@ pub mod worker;
 
 pub use error::{Error, Result};
 #[cfg(windows)]
-pub use vm::{ConsoleHandle, ExitStats, RunOutcome, Stopper, Vm, VmConfig, VmDevices};
+pub use vm::{ConsoleHandle, ExitStats, InputHandle, RunOutcome, Stopper, Vm, VmConfig, VmDevices};

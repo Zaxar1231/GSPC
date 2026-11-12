@@ -29,7 +29,7 @@ pub use partition::{
     DestinationMode, Interrupt, InterruptType, MapFlags, Partition, PartitionConfig, TriggerMode,
 };
 #[cfg(windows)]
-pub use vcpu::{Bus, Exit, RegisterName, RegisterValue, Vcpu};
+pub use vcpu::{Bus, Exit, RegisterName, RegisterValue, Translation, Vcpu};
 
 /// Сырые типы и константы WHPX (имена регистров, структуры сегментов) для `rustdroid-vmm`.
 #[cfg(windows)]

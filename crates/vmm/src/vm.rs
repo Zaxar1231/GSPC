@@ -6,24 +6,33 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use rustdroid_devices::{ConsoleInput, Disk, Serial16550, VirtioBlk, VirtioConsole};
+use rustdroid_devices::{
+    CmosRtc, ConsoleInput, Disk, InputEvent, InputEvents, InputKind, Serial16550, VirtioBlk,
+    VirtioConsole, VirtioInput, VirtioVsock,
+};
+use rustdroid_gpu::{DisplayMode, Mailbox, VirtioGpu};
 use rustdroid_virtio::{GuestMemory, MsiMessage, MsiSink, VirtioPci};
 use rustdroid_whpx::sys::{
-    WHV_INTERNAL_ACTIVITY_REGISTER, WHV_X64_SEGMENT_REGISTER, WHV_X64_SEGMENT_REGISTER_0,
-    WHV_X64_TABLE_REGISTER, WHvRegisterInternalActivityState, WHvX64RegisterCr0, WHvX64RegisterCr3,
-    WHvX64RegisterCr4, WHvX64RegisterCs, WHvX64RegisterDs, WHvX64RegisterEfer, WHvX64RegisterEs,
-    WHvX64RegisterFs, WHvX64RegisterGdtr, WHvX64RegisterGs, WHvX64RegisterIdtr, WHvX64RegisterPat,
-    WHvX64RegisterRflags, WHvX64RegisterRip, WHvX64RegisterRsi, WHvX64RegisterSs, WHvX64RegisterTr,
+    WHV_INTERNAL_ACTIVITY_REGISTER, WHV_REGISTER_NAME, WHV_X64_SEGMENT_REGISTER,
+    WHV_X64_SEGMENT_REGISTER_0, WHV_X64_TABLE_REGISTER, WHvRegisterInternalActivityState,
+    WHvX64RegisterCr0, WHvX64RegisterCr3, WHvX64RegisterCr4, WHvX64RegisterCs, WHvX64RegisterDs,
+    WHvX64RegisterEfer, WHvX64RegisterEs, WHvX64RegisterFs, WHvX64RegisterGdtr, WHvX64RegisterGs,
+    WHvX64RegisterIdtr, WHvX64RegisterPat, WHvX64RegisterRflags, WHvX64RegisterRip,
+    WHvX64RegisterRsi, WHvX64RegisterSs, WHvX64RegisterTr,
 };
 use rustdroid_whpx::{
     DestinationMode, Exit, Interrupt, InterruptType, MapFlags, Partition, PartitionConfig,
-    RegisterName, RegisterValue, TriggerMode, Vcpu, caps,
+    RegisterName, RegisterValue, Translation, TriggerMode, Vcpu, caps,
 };
 
 use crate::acpi::{self, AcpiConfig};
+use crate::aesni;
 use crate::boot_cpu::{BootCpuState, Segment, boot_cpu_state, setup_boot_tables};
 use crate::cmdline::{self, Timing};
 use crate::error::{Error, Result};
+use crate::insn::{
+    Aes, CpuidPolicy, Direction, Insn, Movbe, Operand, decode, load_result, store_bytes,
+};
 use crate::ioapic::{ApicMessage, InterruptSink, IoApic};
 use crate::layout::e820_map;
 use crate::loader::{self, BootSpec};
@@ -57,6 +66,8 @@ pub struct VmConfig {
     pub large_pages: bool,
     /// `CONFIG_HZ` ядра гостя.
     pub guest_hz: u32,
+    /// Консоль ядра: `ttyS0` или `hvc0`.
+    pub kernel_console: String,
 }
 
 /// virtio-устройства ВМ.
@@ -64,8 +75,18 @@ pub struct VmConfig {
 pub struct VmDevices {
     /// Диски virtio-blk (по порядку слотов PCI, начиная с 00:01.0).
     pub disks: Vec<(String, Arc<dyn Disk>)>,
-    /// virtio-console: вывод и буфер ввода.
+    /// virtio-console: вывод и буфер ввода (`hvc0`).
     pub console: Option<(Box<dyn Write + Send>, Arc<ConsoleInput>)>,
+    /// Дополнительные virtio-console (`hvc1`, `hvc2`, … по порядку): имя, вывод и ввод
+    /// (служба хоста может отвечать гостю). Нумерация `hvcN` в госте идёт по порядку
+    /// устройств, поэтому они сразу за `hvc0`.
+    pub extra_consoles: Vec<(String, Box<dyn Write + Send>, Arc<ConsoleInput>)>,
+    /// virtio-vsock с указанным CID гостя.
+    pub vsock_cid: Option<u64>,
+    /// virtio-gpu: режим дисплея и ящик кадров для композитора.
+    pub gpu: Option<(DisplayMode, Arc<Mailbox>)>,
+    /// virtio-input: вид устройства, имя и очередь событий.
+    pub inputs: Vec<(InputKind, String, Arc<InputEvents>)>,
 }
 
 impl std::fmt::Debug for VmDevices {
@@ -80,6 +101,10 @@ impl std::fmt::Debug for VmDevices {
                     .collect::<Vec<_>>(),
             )
             .field("console", &self.console.is_some())
+            .field("extra_consoles", &self.extra_consoles.len())
+            .field("vsock_cid", &self.vsock_cid)
+            .field("gpu", &self.gpu.as_ref().map(|(m, _)| *m))
+            .field("inputs", &self.inputs.len())
             .finish()
     }
 }
@@ -106,13 +131,25 @@ pub struct ExitStats {
     pub halt: u64,
     /// Прочие.
     pub other: u64,
+    /// `#UD`, которые VMM выполнил сам (`MOVBE`, AES-NI на CPU без них).
+    pub emulated: u64,
+    /// Из них AES-NI и `PCLMULQDQ`.
+    pub emulated_aes: u64,
+    /// `#UD`, возвращённые гостю.
+    pub invalid_opcode: u64,
 }
 
 impl ExitStats {
     /// Всего выходов.
     #[must_use]
     pub fn total(&self) -> u64 {
-        self.io + self.mmio + self.cpuid + self.halt + self.other
+        self.io
+            + self.mmio
+            + self.cpuid
+            + self.halt
+            + self.other
+            + self.emulated
+            + self.invalid_opcode
     }
 
     fn add(&mut self, o: &Self) {
@@ -121,6 +158,9 @@ impl ExitStats {
         self.cpuid += o.cpuid;
         self.halt += o.halt;
         self.other += o.other;
+        self.emulated += o.emulated;
+        self.emulated_aes += o.emulated_aes;
+        self.invalid_opcode += o.invalid_opcode;
     }
 }
 
@@ -172,6 +212,29 @@ impl MsiSink for WhpxSink {
     }
 }
 
+/// Счётчик времени работы vCPU для оверлея (можно читать из любого потока).
+#[derive(Debug, Clone)]
+pub struct VcpuLoad {
+    partition: Arc<Partition>,
+    cpus: u32,
+}
+
+impl VcpuLoad {
+    /// Суммарное время работы всех vCPU, единицы по 100 нс.
+    #[must_use]
+    pub fn total_runtime_100ns(&self) -> Option<u64> {
+        (0..self.cpus)
+            .map(|i| self.partition.vcpu_runtime_100ns(i).ok())
+            .sum()
+    }
+
+    /// Число vCPU.
+    #[must_use]
+    pub fn cpus(&self) -> u32 {
+        self.cpus
+    }
+}
+
 /// Остановка ВМ из другого потока.
 #[derive(Debug, Clone)]
 pub struct Stopper {
@@ -216,18 +279,45 @@ impl ConsoleHandle {
     }
 }
 
+/// Ручка устройства ввода: события и пробуждение очереди событий.
+#[derive(Clone)]
+pub struct InputHandle {
+    events: Arc<InputEvents>,
+    function: SharedFunction,
+}
+
+impl std::fmt::Debug for InputHandle {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("InputHandle").finish_non_exhaustive()
+    }
+}
+
+impl InputHandle {
+    /// Передаёт события в гостя сразу, без ожидания кадра.
+    pub fn push(&self, events: &[InputEvent]) {
+        self.events.push(events);
+        self.function
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .notify(0);
+    }
+}
+
 /// Виртуальная машина. Поля удаляются в порядке объявления: workers и партиция до RAM.
 pub struct Vm {
     /// Держит worker-потоки устройств живыми до удаления ВМ.
     _workers: Vec<DeviceWorker>,
     partition: Arc<Partition>,
     serial: Arc<Mutex<Serial16550>>,
+    rtc: Arc<Mutex<CmosRtc>>,
     ioapic: Arc<Mutex<IoApic>>,
     pci: Arc<PciBus>,
     console: Option<ConsoleHandle>,
+    inputs: Vec<InputHandle>,
     events: Arc<VmEvents>,
     stop: Arc<AtomicBool>,
     cpus: u32,
+    cpuid: CpuidPolicy,
     boot: BootCpuState,
     cmdline: String,
     ram: Arc<GuestRam>,
@@ -278,9 +368,19 @@ impl Vm {
             "частоты гипервизора"
         );
 
+        let cpuid = CpuidPolicy::for_host(host_has_aes());
+        if cpuid.hide_avx {
+            tracing::warn!(
+                "у CPU нет AES-NI: AES выполняется программно, AVX скрыт от гостя \
+                 (иначе BoringSSL выбирает AES-GCM на VEX-инструкциях)"
+            );
+        }
         let partition = Partition::new(&PartitionConfig {
             processor_count: cfg.cpus,
-            cpuid_exits: Vec::new(),
+            cpuid_exits: cpuid.exit_leaves(),
+            // Перехват #UD почти ничего не стоит (нормальный код его не вызывает) и позволяет
+            // выполнять MOVBE на CPU без неё.
+            intercept_invalid_opcode: true,
         })?;
 
         let size = cfg
@@ -352,6 +452,26 @@ impl Vm {
             }
             None => None,
         };
+        for (name, out, input) in devices.extra_consoles {
+            add(name, Box::new(VirtioConsole::new(out, input)))?;
+        }
+        if let Some((mode, mailbox)) = devices.gpu {
+            add("gpu".into(), Box::new(VirtioGpu::new(mode, mailbox)))?;
+        }
+        let mut inputs = Vec::new();
+        for (i, (kind, name, events)) in devices.inputs.into_iter().enumerate() {
+            let f = add(
+                format!("input{i}"),
+                Box::new(VirtioInput::new(kind, &name, Arc::clone(&events))),
+            )?;
+            inputs.push(InputHandle {
+                events,
+                function: f,
+            });
+        }
+        if let Some(cid) = devices.vsock_cid {
+            add("vsock".into(), Box::new(VirtioVsock::new(cid)))?;
+        }
         let pci = Arc::new(pci);
 
         // Ядро, ACPI, таблицы.
@@ -364,7 +484,7 @@ impl Vm {
         let cmdline = cfg
             .cmdline_override
             .clone()
-            .unwrap_or_else(|| cmdline::build(&timing, &cfg.cmdline_extra));
+            .unwrap_or_else(|| cmdline::build(&timing, &cfg.kernel_console, &cfg.cmdline_extra));
         #[allow(clippy::cast_possible_truncation, reason = "cpus ≤ 64")]
         let acpi_cfg = AcpiConfig {
             cpus: cfg.cpus as u8,
@@ -402,12 +522,15 @@ impl Vm {
             _workers: workers,
             partition,
             serial,
+            rtc: Arc::new(Mutex::new(CmosRtc::default())),
             ioapic,
             pci,
             console,
+            inputs,
             events: Arc::new(VmEvents::default()),
             stop: Arc::new(AtomicBool::new(false)),
             cpus: cfg.cpus,
+            cpuid,
             boot: boot_cpu_state(&loaded),
             cmdline,
             ram,
@@ -418,6 +541,12 @@ impl Vm {
     #[must_use]
     pub fn serial(&self) -> Arc<Mutex<Serial16550>> {
         Arc::clone(&self.serial)
+    }
+
+    /// Устройства ввода в порядке `VmDevices::inputs`.
+    #[must_use]
+    pub fn inputs(&self) -> Vec<InputHandle> {
+        self.inputs.clone()
     }
 
     /// virtio-console, если подключена.
@@ -436,6 +565,15 @@ impl Vm {
         }
     }
 
+    /// Счётчик загрузки vCPU.
+    #[must_use]
+    pub fn vcpu_load(&self) -> VcpuLoad {
+        VcpuLoad {
+            partition: Arc::clone(&self.partition),
+            cpus: self.cpus,
+        }
+    }
+
     /// Итоговая командная строка ядра.
     #[must_use]
     pub fn cmdline(&self) -> &str {
@@ -446,6 +584,7 @@ impl Vm {
         PlatformBus::new(
             Arc::clone(&self.ram),
             Arc::clone(&self.serial),
+            Arc::clone(&self.rtc),
             Arc::clone(&self.ioapic),
             Arc::clone(&self.pci),
             Arc::clone(&self.events),
@@ -485,12 +624,12 @@ impl Vm {
                 .map(|mut vcpu| {
                     let mut bus = self.bus();
                     let stopper = stopper.clone();
-                    let (events, stop) = (&self.events, &self.stop);
+                    let (events, stop, cpuid) = (&self.events, &self.stop, self.cpuid);
                     std::thread::Builder::new()
                         .name(format!("vcpu{}", vcpu.index()))
                         .spawn_scoped(scope, move || {
                             let _tuning = crate::host::tune_current_thread("Games");
-                            let r = run_loop(&mut vcpu, &mut bus, events, stop);
+                            let r = run_loop(&mut vcpu, &mut bus, events, stop, cpuid);
                             stopper.stop();
                             r
                         })
@@ -500,7 +639,13 @@ impl Vm {
             if let Some(mut vcpu) = bsp {
                 let _tuning = crate::host::tune_current_thread("Games");
                 let mut bus = self.bus();
-                results.push(run_loop(&mut vcpu, &mut bus, &self.events, &self.stop));
+                results.push(run_loop(
+                    &mut vcpu,
+                    &mut bus,
+                    &self.events,
+                    &self.stop,
+                    self.cpuid,
+                ));
                 stopper.stop();
             }
             for h in handles {
@@ -558,6 +703,7 @@ fn run_loop(
     bus: &mut PlatformBus,
     events: &VmEvents,
     stop: &AtomicBool,
+    cpuid: CpuidPolicy,
 ) -> Result<(RunOutcome, ExitStats)> {
     let mut stats = ExitStats::default();
     loop {
@@ -578,7 +724,7 @@ fn run_loop(
             }
             Exit::Cpuid => {
                 stats.cpuid += 1;
-                vcpu.handle_cpuid(|_, _, default| default)?;
+                vcpu.handle_cpuid(|leaf, sub, default| cpuid.apply(leaf, sub, default))?;
             }
             Exit::Halt => {
                 // При эмуляции LAPIC гипервизором HLT обычно обрабатывается без выхода;
@@ -596,7 +742,7 @@ fn run_loop(
             Exit::UnsupportedFeature => {
                 return Err(fault(vcpu, "неподдерживаемая гипервизором возможность"));
             }
-            Exit::Exception => return Err(fault(vcpu, "необработанное исключение гостя")),
+            Exit::Exception => handle_exception(vcpu, bus, &mut stats)?,
             Exit::Msr => return Err(fault(vcpu, "неожиданный выход по MSR")),
             Exit::Other(code) => {
                 tracing::error!(code, "неизвестная причина выхода");
@@ -606,6 +752,224 @@ fn run_loop(
         if events.reset_requested() {
             return Ok((RunOutcome::Reset, stats));
         }
+    }
+}
+
+const VECTOR_UD: u8 = 6;
+const VECTOR_PF: u8 = 14;
+/// Первый регистр XMM в нумерации WHPX (`WHvX64RegisterXmm0`).
+const WHV_XMM0: i32 = 0x1000;
+
+/// Состояние гостя, нужное для эмуляции одной инструкции.
+struct EmuContext {
+    gpr: [u64; 16],
+    rip: u64,
+    fs: u64,
+    gs: u64,
+}
+
+impl EmuContext {
+    fn read(vcpu: &Vcpu) -> Result<Self> {
+        // RAX…R15 (имена 0–15 совпадают с кодировкой x86), RIP, FS, GS.
+        let mut names: Vec<RegisterName> = (0..16).map(WHV_REGISTER_NAME).collect();
+        names.extend([WHvX64RegisterRip, WHvX64RegisterFs, WHvX64RegisterGs]);
+        let mut values = vec![RegisterValue::default(); names.len()];
+        vcpu.get_registers(&names, &mut values)?;
+        let mut gpr = [0_u64; 16];
+        for (g, v) in gpr.iter_mut().zip(&values) {
+            // SAFETY: значения регистров общего назначения — 64-битные.
+            *g = unsafe { v.Reg64 };
+        }
+        // SAFETY: RIP — 64-битный регистр.
+        let rip = unsafe { values[16].Reg64 };
+        // SAFETY: FS — сегментный регистр.
+        let fs = unsafe { values[17].Segment.Base };
+        // SAFETY: GS — сегментный регистр.
+        let gs = unsafe { values[18].Segment.Base };
+        Ok(Self { gpr, rip, fs, gs })
+    }
+}
+
+/// Куски физической памяти гостя для `size` байт с адреса `ea` (по страницам). `None` —
+/// гостю поставлен `#PF`, инструкция повторится после его обработки.
+fn guest_chunks(
+    vcpu: &Vcpu,
+    ea: u64,
+    size: usize,
+    write: bool,
+) -> Result<Option<Vec<(u64, usize)>>> {
+    let mut chunks = Vec::with_capacity(2);
+    let mut done = 0_usize;
+    while done < size {
+        let gva = ea.wrapping_add(done as u64);
+        let in_page = usize::try_from(0x1000 - (gva & 0xFFF)).unwrap_or(0x1000);
+        let len = in_page.min(size - done);
+        match vcpu.translate(gva, write)? {
+            Translation::Mapped(gpa) => chunks.push((gpa, len)),
+            Translation::PageFault { present } => {
+                // Ошибка страницы как от настоящей инструкции.
+                let code = u32::from(present)
+                    | (u32::from(write) << 1)
+                    | (u32::from(vcpu.cpl() == 3) << 2);
+                vcpu.inject_exception(VECTOR_PF, Some(code), gva)?;
+                return Ok(None);
+            }
+        }
+        done += len;
+    }
+    Ok(Some(chunks))
+}
+
+fn read_chunks(bus: &mut PlatformBus, chunks: &[(u64, usize)], out: &mut [u8]) {
+    let mut off = 0;
+    for (gpa, len) in chunks {
+        bus.mmio_read(*gpa, &mut out[off..off + len]);
+        off += len;
+    }
+}
+
+fn reg64(v: u64) -> RegisterValue {
+    let mut r = RegisterValue::default();
+    r.Reg64 = v;
+    r
+}
+
+/// `#UD` в госте: `MOVBE` и AES-NI выполняются программно, остальное возвращается гостю.
+fn handle_exception(vcpu: &mut Vcpu, bus: &mut PlatformBus, stats: &mut ExitStats) -> Result<()> {
+    let (vector, bytes) = vcpu.exception();
+    if vector != VECTOR_UD {
+        // Перехватывается только #UD; другое — вернуть гостю как есть.
+        vcpu.inject_exception(vector, None, 0)?;
+        return Ok(());
+    }
+    let mut code = bytes.to_vec();
+    if code.len() < 4 {
+        // WHPX может не передать байты инструкции: читаем их из памяти гостя по RIP.
+        code = fetch_code(vcpu, bus, vcpu.exit_context().VpContext.Rip)?;
+    }
+    let Some(insn) = decode(&code) else {
+        stats.invalid_opcode += 1;
+        vcpu.inject_exception(VECTOR_UD, None, 0)?;
+        return Ok(());
+    };
+    let ctx = EmuContext::read(vcpu)?;
+    let done = match insn {
+        Insn::Movbe(m) => emulate_movbe(vcpu, bus, &ctx, &m)?,
+        Insn::Aes(a) => {
+            let done = emulate_aes(vcpu, bus, &ctx, &a)?;
+            stats.emulated_aes += u64::from(done);
+            done
+        }
+    };
+    if done {
+        stats.emulated += 1;
+    }
+    Ok(())
+}
+
+fn emulate_movbe(vcpu: &Vcpu, bus: &mut PlatformBus, ctx: &EmuContext, m: &Movbe) -> Result<bool> {
+    let next = ctx.rip.wrapping_add(u64::from(m.len));
+    let ea = m.mem.address(&ctx.gpr, next, ctx.fs, ctx.gs);
+    let write = m.direction == Direction::Store;
+    let size = usize::from(m.size);
+    let Some(chunks) = guest_chunks(vcpu, ea, size, write)? else {
+        return Ok(false);
+    };
+    let reg = usize::from(m.reg & 15);
+    let mut names: Vec<RegisterName> = vec![WHvX64RegisterRip];
+    let mut values = vec![reg64(next)];
+    match m.direction {
+        Direction::Load => {
+            let mut data = [0_u8; 8];
+            read_chunks(bus, &chunks, &mut data[..size]);
+            names.push(WHV_REGISTER_NAME(i32::from(m.reg & 15)));
+            values.push(reg64(load_result(ctx.gpr[reg], &data[..size], m.size)));
+        }
+        Direction::Store => {
+            let data = store_bytes(ctx.gpr[reg], m.size);
+            let mut off = 0;
+            for (gpa, len) in &chunks {
+                bus.mmio_write(*gpa, &data[off..off + len]);
+                off += len;
+            }
+        }
+    }
+    vcpu.set_registers(&names, &values)?;
+    Ok(true)
+}
+
+fn xmm_name(n: u8) -> RegisterName {
+    WHV_REGISTER_NAME(WHV_XMM0 + i32::from(n & 15))
+}
+
+fn read_xmm(vcpu: &Vcpu, n: u8) -> Result<[u8; 16]> {
+    let mut v = [RegisterValue::default()];
+    vcpu.get_registers(&[xmm_name(n)], &mut v)?;
+    // SAFETY: регистр XMM — 128-битный, значение инициализировано WHPX.
+    let wide = unsafe { v[0].Reg128 };
+    // SAFETY: WHV_UINT128 — объединение двух представлений одних и тех же 16 байт.
+    let half = unsafe { wide.Anonymous };
+    let (lo, hi) = (half.Low64, half.High64);
+    let mut out = [0_u8; 16];
+    out[..8].copy_from_slice(&lo.to_le_bytes());
+    out[8..].copy_from_slice(&hi.to_le_bytes());
+    Ok(out)
+}
+
+fn emulate_aes(vcpu: &Vcpu, bus: &mut PlatformBus, ctx: &EmuContext, a: &Aes) -> Result<bool> {
+    let next = ctx.rip.wrapping_add(u64::from(a.len));
+    let src = match a.src {
+        Operand::Reg(r) => read_xmm(vcpu, r)?,
+        Operand::Mem(mem) => {
+            let ea = mem.address(&ctx.gpr, next, ctx.fs, ctx.gs);
+            let Some(chunks) = guest_chunks(vcpu, ea, 16, false)? else {
+                return Ok(false);
+            };
+            let mut data = [0_u8; 16];
+            read_chunks(bus, &chunks, &mut data);
+            data
+        }
+    };
+    let dst = read_xmm(vcpu, a.dst)?;
+    let out = aesni::execute(a.op, &dst, &src);
+    let mut xmm = RegisterValue::default();
+    let mut lo = [0_u8; 8];
+    let mut hi = [0_u8; 8];
+    lo.copy_from_slice(&out[..8]);
+    hi.copy_from_slice(&out[8..]);
+    xmm.Reg128.Anonymous.Low64 = u64::from_le_bytes(lo);
+    xmm.Reg128.Anonymous.High64 = u64::from_le_bytes(hi);
+    vcpu.set_registers(&[xmm_name(a.dst), WHvX64RegisterRip], &[xmm, reg64(next)])?;
+    Ok(true)
+}
+
+/// До 15 байт кода гостя с адреса `rip` (пустой вектор, если страница не отображена).
+fn fetch_code(vcpu: &Vcpu, bus: &mut PlatformBus, rip: u64) -> Result<Vec<u8>> {
+    let mut code = Vec::with_capacity(15);
+    let mut gva = rip;
+    while code.len() < 15 {
+        let Translation::Mapped(gpa) = vcpu.translate(gva, false)? else {
+            break;
+        };
+        let in_page = usize::try_from(0x1000 - (gva & 0xFFF)).unwrap_or(0x1000);
+        let len = in_page.min(15 - code.len());
+        let mut buf = vec![0_u8; len];
+        bus.mmio_read(gpa, &mut buf);
+        code.extend_from_slice(&buf);
+        gva = gva.wrapping_add(len as u64);
+    }
+    Ok(code)
+}
+
+/// Есть ли у CPU хоста AES-NI.
+fn host_has_aes() -> bool {
+    #[cfg(target_arch = "x86_64")]
+    {
+        std::arch::is_x86_feature_detected!("aes")
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        false
     }
 }
 

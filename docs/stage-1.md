@@ -45,10 +45,10 @@ cargo xtask busybox-initramfs
 
 **Вариант А — GKI android15-6.6 (основной).** Откройте <https://ci.android.com>, ветка
 `aosp_kernel-common-android15-6.6`, таргет `kernel_virt_x86_64`, возьмите номер любой зелёной
-сборки и выполните:
+сборки и выполните (или `latest` — последняя удачная сборка):
 
 ```powershell
-cargo xtask guest-fetch --kernel-build <НОМЕР>
+cargo xtask guest-fetch --kernel-build <НОМЕР|latest>
 # → guest\cache\bzImage-<НОМЕР>, sha256 печатается в консоль
 ```
 

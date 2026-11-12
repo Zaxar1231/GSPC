@@ -239,10 +239,16 @@ const SLOTTED: &[&str] = &[
     "vbmeta_system_dlkm",
     "vbmeta_vendor_dlkm",
 ];
-const SHARED: &[&str] = &["super", "userdata"];
+/// Размер пустого раздела `userdata`, если образа нет или он слишком мал.
+pub const USERDATA_SIZE: u64 = 8 << 30;
+/// Образ `userdata` с файлом меньше этого размера не используется: в архивах Cuttlefish это
+/// sparse-образ пустой файловой системы (файл — пара МиБ). Вместо него даётся пустой раздел
+/// [`USERDATA_SIZE`], который Android форматирует сам (флаг `formattable` в fstab); так размер
+/// данных не зависит от образа. Свой полноразмерный `userdata.img` используется как есть.
+const USERDATA_MIN_IMAGE: u64 = 256 << 20;
 
-/// План разделов по каталогу образов: слотовые разделы `_a`, `super`, `userdata`, плюс пустые
-/// `misc` (1 МиБ) и `metadata` (64 МиБ), которые Android форматирует сам.
+/// План разделов по каталогу образов: слотовые разделы `_a`, `super`, `userdata`, `custom`, плюс
+/// пустые `misc`, `frp` (по 1 МиБ) и `metadata` (64 МиБ), которые Android форматирует сам.
 ///
 /// # Errors
 /// Нет `super.img`.
@@ -255,11 +261,20 @@ pub fn partition_plan(dir: &Path) -> Result<Vec<PartitionPlan>, AndroidError> {
     if exists("super").is_none() {
         return Err(AndroidError::Missing("super.img"));
     }
-    let mut plan = vec![PartitionPlan {
-        name: "misc".into(),
-        image: None,
-        empty_size: 1 << 20,
-    }];
+    let mut plan = vec![
+        PartitionPlan {
+            name: "misc".into(),
+            image: None,
+            empty_size: 1 << 20,
+        },
+        // Factory reset protection: без него PersistentDataBlockService не стартует и
+        // system_server падает (`ro.frp.pst=/dev/block/by-name/frp`).
+        PartitionPlan {
+            name: "frp".into(),
+            image: None,
+            empty_size: 1 << 20,
+        },
+    ];
     for n in SLOTTED {
         if let Some(p) = exists(n) {
             plan.push(PartitionPlan {
@@ -269,14 +284,25 @@ pub fn partition_plan(dir: &Path) -> Result<Vec<PartitionPlan>, AndroidError> {
             });
         }
     }
-    for n in SHARED {
-        if let Some(p) = exists(n) {
-            plan.push(PartitionPlan {
-                name: (*n).to_owned(),
-                image: Some(p),
-                empty_size: 0,
-            });
-        }
+    plan.push(PartitionPlan {
+        name: "super".into(),
+        image: exists("super"),
+        empty_size: 0,
+    });
+    let userdata = exists("userdata")
+        .filter(|p| std::fs::metadata(p).is_ok_and(|m| m.len() >= USERDATA_MIN_IMAGE));
+    plan.push(PartitionPlan {
+        name: "userdata".into(),
+        empty_size: if userdata.is_some() { 0 } else { USERDATA_SIZE },
+        image: userdata,
+    });
+    // Пример пользовательского раздела Cuttlefish (init монтирует его в /mnt/vendor/custom).
+    if let Some(p) = exists("cuttlefish_example_custom") {
+        plan.push(PartitionPlan {
+            name: "custom".into(),
+            image: Some(p),
+            empty_size: 0,
+        });
     }
     plan.push(PartitionPlan {
         name: "metadata".into(),
@@ -285,6 +311,34 @@ pub fn partition_plan(dir: &Path) -> Result<Vec<PartitionPlan>, AndroidError> {
     });
     Ok(plan)
 }
+
+/// Выбор вариантов APEX с несколькими установленными версиями (`ro.boot.vendor.apex.*`).
+pub const VENDOR_APEX_DEFAULTS: &[(&str, &str)] = &[
+    (
+        "com.android.hardware.gatekeeper",
+        "com.android.hardware.gatekeeper.nonsecure",
+    ),
+    (
+        "com.android.hardware.keymint",
+        "com.android.hardware.keymint.rust_nonsecure",
+    ),
+    (
+        "com.android.hardware.graphics.composer",
+        "com.android.hardware.graphics.composer.ranchu",
+    ),
+    (
+        "com.google.emulated.camera.provider.hal",
+        "com.google.emulated.camera.provider.hal",
+    ),
+];
+
+/// Параметры HAL Cuttlefish по умолчанию (`launch_cvd` задаёт их сам).
+pub const CUTTLEFISH_HAL_DEFAULTS: &[(&str, &str)] = &[
+    ("androidboot.vsock_lights_port", "6900"),
+    ("androidboot.modem_simulator_ports", "9600"),
+    ("androidboot.openthread_node_id", "1"),
+    ("androidboot.wifi_mac_prefix", "5554"),
+];
 
 /// Параметры bootconfig RustDroid поверх vendor bootconfig.
 ///
@@ -296,11 +350,36 @@ pub fn rustdroid_bootconfig(vendor: &str, boot_device: &str, console: &str) -> B
     bc.set("androidboot.slot_suffix", "_a");
     bc.set("androidboot.force_normal_boot", "1");
     bc.set("androidboot.verifiedbootstate", "orange");
+    // Разблокированное состояние AVB: ошибки проверки vbmeta не блокируют загрузку.
+    bc.set("androidboot.vbmeta.device_state", "unlocked");
+    bc.set("androidboot.setupwizard_mode", "DISABLED");
     bc.set("androidboot.serialno", "RUSTDROID0001");
     bc.set("androidboot.console", console);
     bc.set("androidboot.selinux", "permissive");
     if bc.get("androidboot.hardware").is_none() {
         bc.set("androidboot.hardware", "cutf_cvm");
+    }
+    // У Cuttlefish часть HAL поставляется несколькими вариантами одного APEX; без выбора
+    // apexd-bootstrap падает и Android перезагружается (`bootstrap-apexd-failed`). Значение —
+    // имя файла без `.apex`. Варианты `cf_remote`/`trusty` требуют хостовых сервисов
+    // Cuttlefish, которых у нас нет.
+    for (module, choice) in VENDOR_APEX_DEFAULTS {
+        let key = format!("androidboot.vendor.apex.{module}");
+        if bc.get(&key).is_none() {
+            bc.set(&key, choice);
+        }
+    }
+    // Параметры, которые HAL Cuttlefish читают из ro.boot.* и без которых завершаются:
+    // подсветка — vsock-сервер в госте, RIL — клиент модема на хосте (vsock), Thread — номер узла.
+    for (key, value) in CUTTLEFISH_HAL_DEFAULTS {
+        if bc.get(key).is_none() {
+            bc.set(key, value);
+        }
+    }
+    // Первый этап init ищет `fstab.<suffix>`: у Cuttlefish в vendor ramdisk лежат только
+    // `fstab.cf.*`, суффикс задаёт launch_cvd. userdata — f2fs, шифрование имён — HCTR2.
+    if bc.get("androidboot.fstab_suffix").is_none() {
+        bc.set("androidboot.fstab_suffix", "cf.f2fs.hctr2");
     }
     bc
 }
@@ -391,6 +470,17 @@ mod tests {
         );
         assert_eq!(bc.get("androidboot.console"), Some("ttyS0"));
         assert_eq!(bc.get("androidboot.hardware"), Some("cutf_cvm"));
+        assert_eq!(bc.get("androidboot.fstab_suffix"), Some("cf.f2fs.hctr2"));
+        assert_eq!(bc.get("androidboot.vsock_lights_port"), Some("6900"));
+        assert_eq!(
+            bc.get("androidboot.vendor.apex.com.android.hardware.gatekeeper"),
+            Some("com.android.hardware.gatekeeper.nonsecure")
+        );
+        assert_eq!(
+            bc.get("androidboot.vendor.apex.com.android.hardware.graphics.composer"),
+            Some("com.android.hardware.graphics.composer.ranchu")
+        );
+        assert_eq!(bc.get("androidboot.vbmeta.device_state"), Some("unlocked"));
         let text = bc.render();
         assert_eq!(text.matches("androidboot.console").count(), 1);
         assert!(text.contains("androidboot.boot_devices = \"pci0000:00/0000:00:01.0\"\n"));
@@ -430,10 +520,15 @@ mod tests {
         }
         let plan = partition_plan(&dir).unwrap();
         let names: Vec<_> = plan.iter().map(|p| p.name.as_str()).collect();
+        // Маленький файл userdata.img (sparse-образ Cuttlefish) заменяется пустым разделом.
+        let userdata = plan.iter().find(|p| p.name == "userdata").unwrap();
+        assert_eq!(userdata.image, None);
+        assert_eq!(userdata.empty_size, USERDATA_SIZE);
         assert_eq!(
             names,
             [
                 "misc",
+                "frp",
                 "boot_a",
                 "vendor_boot_a",
                 "vbmeta_a",

@@ -44,7 +44,7 @@ BlueStacks-class keymapping. Performance is priority #1.
 | OS | Windows 11 x64 (21H2+) | Windows 11 24H2+ |
 | CPU | 4 cores, VT-x or AMD-V (SVM) | 8+ cores |
 | RAM | 8 GB | 16 GB+ |
-| GPU | Vulkan 1.3 and D3D12 | Discrete NVIDIA/AMD or Intel Arc, recent driver |
+| GPU | any (without D3D12 and Vulkan — software mode, slower) | Vulkan 1.3 and D3D12: discrete NVIDIA/AMD or Intel Arc, recent driver |
 | Windows feature | Windows Hypervisor Platform | — |
 
 Windows 10 is not supported.

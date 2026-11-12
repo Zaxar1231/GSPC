@@ -16,9 +16,10 @@ keymapping уровня BlueStacks. Производительность — п�
 </div>
 
 > [!WARNING]
-> Проект на ранней стадии (этап 2: virtio и загрузка Android до шелла). Можно загрузить ядро
-> Linux с initramfs ([docs/stage-1.md](docs/stage-1.md)) и Android из образов Cuttlefish
-> ([docs/stage-2.md](docs/stage-2.md)) — пока в консоли. Окно с экраном появится на этапе 3.
+> Проект на ранней стадии (этап 4: 3D на видеокарте). Android 17 из образов Cuttlefish
+> загружается до рабочего стола в окне, с управлением мышью и оверлеем производительности
+> ([docs/stage-3.md](docs/stage-3.md)); пока рисует процессор, поэтому FPS низкий.
+> Проверить на своём компьютере: [docs/hardware-test.md](docs/hardware-test.md).
 
 ![Скриншот (заглушка)](docs/assets/screenshot-placeholder.svg)
 
@@ -46,11 +47,13 @@ keymapping уровня BlueStacks. Производительность — п�
 | ОС | Windows 11 x64 (21H2+) | Windows 11 24H2+ |
 | CPU | 4 ядра, VT-x или AMD-V (SVM) | 8+ ядер (на гибридных Intel учитываются P-ядра) |
 | ОЗУ | 8 ГБ | 16 ГБ+ |
-| GPU | Vulkan 1.3 и D3D12 | Дискретная NVIDIA/AMD или Intel Arc со свежим драйвером |
+| GPU | любая (без DirectX 12 и Vulkan — программный режим, медленнее) | Vulkan 1.3 и D3D12: дискретная NVIDIA/AMD или Intel Arc со свежим драйвером |
 | Диск | 10 ГБ свободно, SSD | NVMe SSD |
 | Компоненты Windows | Windows Hypervisor Platform | — |
 
-Windows 10 не поддерживается.
+Windows 10 не поддерживается. На старых видеокартах без Vulkan и DirectX 12 эмулятор работает в
+упрощённом режиме ([ADR 0009](docs/adr/0009-weak-gpu-support.md)): 2D и лёгкие игры — да, тяжёлые
+3D-игры с высоким FPS — нет.
 
 ## Установка
 
@@ -60,21 +63,31 @@ Windows Hypervisor Platform (UAC запросится только на этот
 
 ## Быстрый старт
 
-Сейчас (этап 1) — загрузка ядра Linux в консоли, подробно в [docs/stage-1.md](docs/stage-1.md):
+**Проверка на своём компьютере одним скриптом** (поставит инструменты, соберёт, прогонит этапы 1–3
+и сложит логи в архив на рабочем столе), подробно в [docs/hardware-test.md](docs/hardware-test.md):
+
+```powershell
+irm https://raw.githubusercontent.com/Zaxar1231/GSPC/feat/stage-3-display-input/scripts/hw-test.ps1 -OutFile $env:TEMP\hw-test.ps1
+powershell -ExecutionPolicy Bypass -File $env:TEMP\hw-test.ps1
+```
+
+Вручную. Этап 1 — загрузка ядра Linux в консоли, подробно в [docs/stage-1.md](docs/stage-1.md):
 
 ```powershell
 cargo build --release
 .\target\release\rustdroid.exe check
 cargo xtask busybox-initramfs
-cargo xtask guest-fetch --kernel-build <НОМЕР_СБОРКИ>
+cargo xtask guest-fetch --kernel-build latest
 .\target\release\rustdroid.exe boot --kernel guest\cache\bzImage-<НОМЕР_СБОРКИ> --initrd guest\cache\initramfs-busybox.cpio
 ```
 
 Android из образов Cuttlefish (этап 2), подробно в [docs/stage-2.md](docs/stage-2.md):
 
 ```powershell
-cargo xtask cf-fetch --build <НОМЕР_СБОРКИ>
+cargo xtask cf-fetch --build latest
 .\target\release\rustdroid.exe boot-android --images guest\cache\cf-<НОМЕР_СБОРКИ> --memory 4096 --cpus 2
+# с окном, мышью и оверлеем (этап 3):
+.\target\release\rustdroid.exe boot-android --images guest\cache\cf-<НОМЕР_СБОРКИ> --memory 4096 --cpus 4 --display 1920x1080@120
 ```
 
 Выход из консоли гостя: `Ctrl+A`, затем `X`.
@@ -158,10 +171,10 @@ Hyper-V), перестанут запускаться или будут рабо
 | Этап | Содержание | Статус |
 |---|---|---|
 | 0 | Репозиторий, workspace, CI, документация | ✅ |
-| 1 | Минимальный VMM на WHPX: ядро Linux + initramfs, serial-консоль | ✅ (ждёт проверки на железе) |
-| 2 | virtio-pci/MSI-X, virtio-blk, virtio-console: AOSP до шелла | 🚧 |
-| 3 | virtio-gpu 2D, D3D12-композитор, virtio-input, оверлей производительности | ⏳ |
-| 4 | 3D: gfxstream + ANGLE-on-Vulkan | ⏳ |
+| 1 | Минимальный VMM на WHPX: ядро Linux + initramfs, serial-консоль | ✅ |
+| 2 | virtio-pci/MSI-X, virtio-blk, virtio-console: AOSP до шелла | ✅ |
+| 3 | virtio-gpu 2D, D3D12-композитор, virtio-input, оверлей производительности | ✅ |
+| 4 | 3D: gfxstream + ANGLE-on-Vulkan, запасной путь через D3D11 | 🚧 |
 | 5 | virtio-net (NAT), virtio-vsock, гостевой агент | ⏳ |
 | 6 | Keymapping, профили, редактор | ⏳ |
 | 7 | Установщик, автообновление, релизный пайплайн | ⏳ |

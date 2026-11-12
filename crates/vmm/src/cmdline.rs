@@ -19,11 +19,22 @@ pub struct Timing {
 
 /// Собирает командную строку: базовые параметры платформы + `extra` пользователя.
 #[must_use]
-pub fn build(timing: &Timing, extra: &str) -> String {
+///
+/// `console` — консоль ядра: `ttyS0` (COM1) или `hvc0` (virtio-console: вывод пачками, без
+/// выхода vCPU на каждый байт). Ранний вывод до загрузки драйвера идёт через earlycon на COM1.
+pub fn build(timing: &Timing, console: &str, extra: &str) -> String {
     let hz = u64::from(timing.guest_hz.max(1));
+    let console = if console == "ttyS0" {
+        "console=ttyS0,115200".to_owned()
+    } else {
+        format!("console={console}")
+    };
     let mut parts = vec![
-        "console=ttyS0,115200".to_owned(),
+        console,
         "earlycon=uart8250,io,0x3f8,115200".to_owned(),
+        // В GKI CONFIG_SERIAL_8250_RUNTIME_UARTS=0: без этого ttyS0 не регистрируется,
+        // /dev/console указывает на ttynull и вывод программ гостя теряется.
+        "8250.nr_uarts=1".to_owned(),
         format!("tsc_early_khz={}", timing.tsc_hz / 1000),
         "tsc=reliable".to_owned(),
         format!("lpj={}", timing.tsc_hz / hz),
@@ -54,8 +65,9 @@ mod tests {
             apic_hz: 1_000_000_000,
             guest_hz: 250,
         };
-        let c = build(&t, "  loglevel=7 ");
+        let c = build(&t, "ttyS0", "  loglevel=7 ");
         assert!(c.contains("tsc_early_khz=3000000"));
+        assert!(c.contains("8250.nr_uarts=1"));
         assert!(c.contains("lpj=12000000"));
         assert!(c.contains("lapic_timer_period=4000000"));
         assert!(c.ends_with(" loglevel=7"));
@@ -69,6 +81,9 @@ mod tests {
             apic_hz: 1000,
             guest_hz: 0,
         };
-        assert!(build(&t, "").contains("lpj=1000"));
+        assert!(build(&t, "ttyS0", "").contains("lpj=1000"));
+        let hvc = build(&t, "hvc0", "");
+        assert!(hvc.starts_with("console=hvc0 earlycon="));
+        assert!(!hvc.contains("ttyS0"));
     }
 }

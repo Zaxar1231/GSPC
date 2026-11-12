@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
   Одноразовая настройка GitHub-репозитория RustDroid: описание, topics, метки, milestones,
   привязка issues к milestones, доска Projects, защита ветки main.

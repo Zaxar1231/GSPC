@@ -36,7 +36,8 @@
    оверлеи лежат в `%LOCALAPPDATA%\RustDroid\instances\<имя>\overlays`. `--reset` возвращает
    инстанс к исходным образам.
 4. Диск — устройство PCI `00:01.0` (`androidboot.boot_devices=pci0000:00/0000:00:01.0`), консоль
-   Android — `ttyS0` (или `hvc0` с `--console hvc`).
+   Android — всегда `hvc0` (virtio-console); ранний лог ядра идёт через COM1. Ещё 19 консолей
+   (`hvc1`…`hvc19`) повторяют раскладку Cuttlefish: logcat в `hvc2`, HAL на своих портах.
 
 ## Как запустить
 
@@ -58,12 +59,13 @@ cargo build --release
 
 ### Android
 
-1. На <https://ci.android.com> выберите ветку с Android 15 и таргет Cuttlefish x86_64 (например,
-   `aosp_cf_x86_64_phone-trunk_staging-userdebug`), возьмите номер зелёной сборки.
+1. По умолчанию берётся ветка `aosp-android-latest-release`, таргет
+   `aosp_cf_x86_64_only_phone-userdebug` (Android 17: публичных сборок Cuttlefish с Android 15
+   на ci.android.com больше нет). `latest` — последняя удачная сборка.
 2. Скачайте образы:
 
    ```powershell
-   cargo xtask cf-fetch --build <НОМЕР> [--target <ТАРГЕТ>]
+   cargo xtask cf-fetch --build <НОМЕР|latest> [--branch <ВЕТКА>] [--target <ТАРГЕТ>]
    # → guest\cache\cf-<НОМЕР>\ (boot.img, init_boot.img, vendor_boot.img, super.img, …)
    ```
 
@@ -74,8 +76,16 @@ cargo build --release
        --images guest\cache\cf-<НОМЕР> --memory 4096 --cpus 2 --serial-log android.log -v
    ```
 
+`super.img` и `userdata.img` в архиве Cuttlefish — в формате Android sparse. Они читаются как есть
+(`SparseDisk`, индекс чанков), распаковывать их не нужно.
+
+`userdata.img` из архива Cuttlefish — sparse-образ пустой файловой системы; вместо него подаётся
+пустой раздел 8 ГиБ: Android форматирует его при первой загрузке. В bootconfig
+по умолчанию добавляются `androidboot.fstab_suffix=cf.f2fs.hctr2` (иначе первый этап init не
+найдёт fstab) и `androidboot.vbmeta.device_state=unlocked`.
+
 Ожидаемый результат: лог ядра, `init: first stage`, монтирование `super`, второй этап `init` и
-приглашение шелла `console:/ $` на ttyS0 (в userdebug-сборках).
+приглашение шелла `console:/ $` на hvc0 (в userdebug-сборках).
 
 ## Что прислать после запуска
 

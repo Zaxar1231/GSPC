@@ -2,8 +2,11 @@
 //!
 //! - [`FrameStats`]: окно времён кадра, средний FPS, 1% low, перцентили. Используется
 //!   оверлеем, бенч-сценариями и порогами регрессии в CI;
+//! - [`overlay`]: оверлей производительности (текст 5×7 и график времени кадра) в кадре;
 //! - позже здесь же: настройка `tracing` + Tracy, ротация логов, minidump, «Отправить отчёт».
 
 pub mod frame_stats;
+pub mod overlay;
+pub mod usage;
 
 pub use frame_stats::{FrameStats, FrameSummary};

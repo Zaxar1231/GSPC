@@ -9,13 +9,16 @@ use windows::Win32::System::Hypervisor::{
     WHV_EMULATOR_CALLBACKS, WHV_EMULATOR_IO_ACCESS_INFO, WHV_EMULATOR_MEMORY_ACCESS_INFO,
     WHV_EMULATOR_STATUS, WHV_REGISTER_NAME, WHV_REGISTER_VALUE, WHV_RUN_VP_EXIT_CONTEXT,
     WHV_TRANSLATE_GVA_FLAGS, WHV_TRANSLATE_GVA_RESULT, WHV_TRANSLATE_GVA_RESULT_CODE,
-    WHvRunVpExitReasonCanceled, WHvRunVpExitReasonException,
-    WHvRunVpExitReasonInvalidVpRegisterValue, WHvRunVpExitReasonMemoryAccess,
-    WHvRunVpExitReasonUnrecoverableException, WHvRunVpExitReasonUnsupportedFeature,
-    WHvRunVpExitReasonX64ApicEoi, WHvRunVpExitReasonX64Cpuid, WHvRunVpExitReasonX64Halt,
-    WHvRunVpExitReasonX64InterruptWindow, WHvRunVpExitReasonX64IoPortAccess,
-    WHvRunVpExitReasonX64MsrAccess, WHvX64RegisterRax, WHvX64RegisterRbx, WHvX64RegisterRcx,
-    WHvX64RegisterRdx, WHvX64RegisterRip,
+    WHV_X64_PENDING_EXCEPTION_EVENT_0, WHvRegisterPendingEvent, WHvRunVpExitReasonCanceled,
+    WHvRunVpExitReasonException, WHvRunVpExitReasonInvalidVpRegisterValue,
+    WHvRunVpExitReasonMemoryAccess, WHvRunVpExitReasonUnrecoverableException,
+    WHvRunVpExitReasonUnsupportedFeature, WHvRunVpExitReasonX64ApicEoi, WHvRunVpExitReasonX64Cpuid,
+    WHvRunVpExitReasonX64Halt, WHvRunVpExitReasonX64InterruptWindow,
+    WHvRunVpExitReasonX64IoPortAccess, WHvRunVpExitReasonX64MsrAccess,
+    WHvTranslateGvaFlagSetPageTableBits, WHvTranslateGvaFlagValidateRead,
+    WHvTranslateGvaFlagValidateWrite, WHvTranslateGvaResultPageNotPresent,
+    WHvTranslateGvaResultSuccess, WHvX64RegisterCr2, WHvX64RegisterRax, WHvX64RegisterRbx,
+    WHvX64RegisterRcx, WHvX64RegisterRdx, WHvX64RegisterRip,
 };
 use windows::core::HRESULT;
 
@@ -45,6 +48,18 @@ pub trait Bus {
     fn mmio_read(&mut self, gpa: u64, data: &mut [u8]);
     /// Запись по гостевому физическому адресу.
     fn mmio_write(&mut self, gpa: u64, data: &[u8]);
+}
+
+/// Результат перевода виртуального адреса гостя.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Translation {
+    /// Физический адрес.
+    Mapped(u64),
+    /// Обращение вызвало бы `#PF`: страницы нет (`present = false`) или нет прав.
+    PageFault {
+        /// Страница присутствует (нарушение прав).
+        present: bool,
+    },
 }
 
 /// Причина выхода из гостя.
@@ -257,6 +272,89 @@ impl Vcpu {
             )
         };
         check("WHvSetVirtualProcessorRegisters", hr)
+    }
+
+    /// Перехваченное исключение (после [`Exit::Exception`]): вектор и байты инструкции.
+    #[must_use]
+    pub fn exception(&self) -> (u8, &[u8]) {
+        // SAFETY: для выхода Exception заполнено поле VpException; вызывающий проверяет
+        // причину выхода, иначе байты — нули и декодер их отвергнет.
+        let e = unsafe { &self.exit.Anonymous.VpException };
+        let n = usize::from(e.InstructionByteCount).min(e.InstructionBytes.len());
+        (
+            e.ExceptionType,
+            e.InstructionBytes.get(..n).unwrap_or_default(),
+        )
+    }
+
+    /// Уровень привилегий гостя в момент выхода (0 — ядро, 3 — пользователь).
+    #[must_use]
+    pub fn cpl(&self) -> u8 {
+        // SAFETY: ExecutionState — битовое поле, младшие 2 бита — CPL.
+        #[allow(clippy::cast_possible_truncation, reason = "2 бита")]
+        let cpl = (unsafe { self.exit.VpContext.ExecutionState.Anonymous._bitfield } & 3) as u8;
+        cpl
+    }
+
+    /// Переводит виртуальный адрес гостя в физический с проверкой прав, как при обращении
+    /// с текущим CPL; биты Accessed/Dirty в таблицах страниц выставляются.
+    ///
+    /// # Errors
+    /// Ошибка WHPX.
+    pub fn translate(&self, gva: u64, write: bool) -> Result<Translation> {
+        let mut flags = WHvTranslateGvaFlagValidateRead.0 | WHvTranslateGvaFlagSetPageTableBits.0;
+        if write {
+            flags |= WHvTranslateGvaFlagValidateWrite.0;
+        }
+        let api = self.partition.api();
+        let mut result = WHV_TRANSLATE_GVA_RESULT::default();
+        let mut gpa = 0_u64;
+        // SAFETY: выходные указатели — локальные переменные.
+        check("WHvTranslateGva", unsafe {
+            (api.translate_gva)(
+                self.partition.handle(),
+                self.index,
+                gva,
+                WHV_TRANSLATE_GVA_FLAGS(flags),
+                &raw mut result,
+                &raw mut gpa,
+            )
+        })?;
+        Ok(match result.ResultCode {
+            c if c == WHvTranslateGvaResultSuccess => Translation::Mapped(gpa),
+            c if c == WHvTranslateGvaResultPageNotPresent => {
+                Translation::PageFault { present: false }
+            }
+            _ => Translation::PageFault { present: true },
+        })
+    }
+
+    /// Ставит гостю исключение `vector` (с кодом ошибки и параметром — CR2 для `#PF`); оно
+    /// будет доставлено при следующем запуске vCPU.
+    ///
+    /// # Errors
+    /// Ошибка WHPX.
+    pub fn inject_exception(
+        &self,
+        vector: u8,
+        error_code: Option<u32>,
+        parameter: u64,
+    ) -> Result<()> {
+        // WHV_X64_PENDING_EXCEPTION_EVENT: EventPending:1, EventType:3 (0 — исключение),
+        // Reserved:4, DeliverErrorCode:1, Reserved:7, Vector:16.
+        let bits = 1_u32 | (u32::from(error_code.is_some()) << 8) | (u32::from(vector) << 16);
+        let mut value = RegisterValue::default();
+        value.ExceptionEvent.Anonymous = WHV_X64_PENDING_EXCEPTION_EVENT_0 {
+            _bitfield: bits,
+            ErrorCode: error_code.unwrap_or(0),
+            ExceptionParameter: parameter,
+        };
+        if vector == 14 {
+            let mut cr2 = RegisterValue::default();
+            cr2.Reg64 = parameter;
+            self.set_registers(&[WHvX64RegisterCr2], &[cr2])?;
+        }
+        self.set_registers(&[WHvRegisterPendingEvent], &[value])
     }
 
     fn instruction_length(&self) -> u64 {

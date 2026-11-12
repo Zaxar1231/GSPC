@@ -64,8 +64,65 @@ pub(crate) struct VmArgs {
     pub serial_log: Option<PathBuf>,
 
     /// Подключить virtio-console и направить в неё ввод (`hvc`) или оставить COM1 (`serial`).
+    /// Для `boot-android` не действует: консоль Android всегда `hvc0`.
     #[arg(long, value_enum, default_value_t = ConsoleKind::Serial)]
     pub console: ConsoleKind,
+
+    /// Окно с экраном гостя: virtio-gpu + virtio-input, `ШИРИНАxВЫСОТА@ГЦ` (например 1920x1080@120).
+    #[arg(long)]
+    pub display: Option<String>,
+
+    /// Выводить без VSync (tearing; для VRR/G-Sync/FreeSync).
+    #[arg(long)]
+    pub no_vsync: bool,
+
+    /// Лимит FPS композитора (0 — без лимита).
+    #[arg(long, default_value_t = 0)]
+    pub fps_limit: u32,
+
+    /// Не показывать оверлей производительности.
+    #[arg(long)]
+    pub no_overlay: bool,
+
+    /// Остановить ВМ через N секунд (0 — не останавливать). Для автоматических проверок.
+    #[arg(long, default_value_t = 0)]
+    pub timeout: u64,
+}
+
+/// Разобранный режим `--display`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(not(windows), allow(dead_code))]
+pub(crate) struct DisplaySpec {
+    pub width: u32,
+    pub height: u32,
+    pub refresh_hz: u32,
+}
+
+#[cfg_attr(not(windows), allow(dead_code))]
+impl DisplaySpec {
+    pub(crate) fn parse(s: &str) -> Result<Self, String> {
+        let (size, hz) = s.split_once('@').unwrap_or((s, "60"));
+        let (w, h) = size
+            .split_once(['x', 'X'])
+            .ok_or("ожидается ШИРИНАxВЫСОТА[@ГЦ]")?;
+        let num = |v: &str, what: &str| {
+            v.trim()
+                .parse::<u32>()
+                .map_err(|_| format!("неверное значение {what}: {v}"))
+        };
+        let spec = Self {
+            width: num(w, "ширины")?,
+            height: num(h, "высоты")?,
+            refresh_hz: num(hz, "частоты")?,
+        };
+        if !(320..=7680).contains(&spec.width) || !(240..=4320).contains(&spec.height) {
+            return Err("разрешение вне диапазона 320x240..7680x4320".into());
+        }
+        if !(24..=360).contains(&spec.refresh_hz) {
+            return Err("частота вне диапазона 24..360 Гц".into());
+        }
+        Ok(spec)
+    }
 }
 
 /// Параметры `boot`.
@@ -109,6 +166,14 @@ pub(crate) struct AndroidArgs {
     /// Сбросить инстанс к исходным образам (удалить оверлеи) перед запуском.
     #[arg(long)]
     pub reset: bool,
+
+    /// Параметр bootconfig `КЛЮЧ=ЗНАЧЕНИЕ` поверх параметров по умолчанию (можно несколько).
+    #[arg(long = "set")]
+    pub bootconfig: Vec<String>,
+
+    /// Куда писать logcat гостя (по умолчанию logcat.txt в каталоге инстанса).
+    #[arg(long)]
+    pub logcat: Option<PathBuf>,
 
     #[command(flatten)]
     pub vm: VmArgs,
@@ -197,6 +262,22 @@ mod tests {
         assert_eq!(a.images, PathBuf::from("cf"));
         assert_eq!(a.instance, "default");
         assert!(a.reset);
+    }
+
+    #[test]
+    fn display_spec() {
+        assert_eq!(
+            DisplaySpec::parse("1920x1080@144").unwrap(),
+            DisplaySpec {
+                width: 1920,
+                height: 1080,
+                refresh_hz: 144
+            }
+        );
+        assert_eq!(DisplaySpec::parse("1280X720").unwrap().refresh_hz, 60);
+        assert!(DisplaySpec::parse("1920").is_err());
+        assert!(DisplaySpec::parse("10x10").is_err());
+        assert!(DisplaySpec::parse("1920x1080@1000").is_err());
     }
 
     #[test]

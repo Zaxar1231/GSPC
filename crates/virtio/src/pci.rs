@@ -151,6 +151,9 @@ impl VirtioPci {
         let class: u32 = match dev_type {
             crate::device::TYPE_BLOCK => 0x01_80_00, // mass storage, other
             crate::device::TYPE_CONSOLE => 0x07_80_00, // communication, other
+            crate::device::TYPE_GPU => 0x03_80_00,   // display, other
+            crate::device::TYPE_INPUT => 0x09_80_00, // input, other
+            crate::device::TYPE_VSOCK => 0x07_80_00, // communication, other
             _ => 0xFF_00_00,
         };
         let c = &mut self.config;
@@ -508,6 +511,23 @@ impl VirtioPci {
         if !self.active {
             return;
         }
+        self.process(index);
+        // Работа, которую обработка породила в других очередях (ограничено, чтобы устройство
+        // не могло зациклить поток).
+        for _ in 0..4 {
+            let pending = self.device.take_pending_queues();
+            if pending == 0 {
+                break;
+            }
+            for q in 0..self.queues.len().min(64) {
+                if pending & (1 << q) != 0 {
+                    self.process(q);
+                }
+            }
+        }
+    }
+
+    fn process(&mut self, index: usize) {
         let Some(queue) = self.queues.get_mut(index) else {
             return;
         };
