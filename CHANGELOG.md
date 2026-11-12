@@ -8,6 +8,13 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Этап 4 начат ([docs/stage-4.md](docs/stage-4.md)).
+- Программное выполнение `MOVBE`/AES-NI читает из WHPX только нужные регистры (регистры адреса и
+  данных, FS/GS при префиксе; RIP — из контекста выхода; оба XMM одним вызовом) вместо 19 при
+  каждой инструкции.
+
 ### Fixed
 
 - KeyMint падал с SIGILL в `_aesni_ctr32_6x` на CPU с AVX, но без AES-NI (i3-3220): BoringSSL

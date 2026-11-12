@@ -31,7 +31,8 @@ use crate::boot_cpu::{BootCpuState, Segment, boot_cpu_state, setup_boot_tables};
 use crate::cmdline::{self, Timing};
 use crate::error::{Error, Result};
 use crate::insn::{
-    Aes, CpuidPolicy, Direction, Insn, Movbe, Operand, decode, load_result, store_bytes,
+    Aes, CpuidPolicy, Direction, Insn, Movbe, Operand, Segment as SegPrefix, decode, load_result,
+    store_bytes,
 };
 use crate::ioapic::{ApicMessage, InterruptSink, IoApic};
 use crate::layout::e820_map;
@@ -769,23 +770,56 @@ struct EmuContext {
 }
 
 impl EmuContext {
-    fn read(vcpu: &Vcpu) -> Result<Self> {
-        // RAX…R15 (имена 0–15 совпадают с кодировкой x86), RIP, FS, GS.
-        let mut names: Vec<RegisterName> = (0..16).map(WHV_REGISTER_NAME).collect();
-        names.extend([WHvX64RegisterRip, WHvX64RegisterFs, WHvX64RegisterGs]);
-        let mut values = vec![RegisterValue::default(); names.len()];
-        vcpu.get_registers(&names, &mut values)?;
-        let mut gpr = [0_u64; 16];
-        for (g, v) in gpr.iter_mut().zip(&values) {
-            // SAFETY: значения регистров общего назначения — 64-битные.
-            *g = unsafe { v.Reg64 };
+    /// Читает только нужное инструкции: регистры адреса и данных, базу FS/GS при префиксе.
+    /// RIP берётся из контекста выхода. Каждый вызов WHPX — это переход в гипервизор, а на CPU
+    /// без MOVBE их десятки тысяч в секунду.
+    fn read(vcpu: &Vcpu, insn: &Insn) -> Result<Self> {
+        let (mem, extra) = match insn {
+            Insn::Movbe(m) => (Some(m.mem), Some(m.reg)),
+            Insn::Aes(a) => match a.src {
+                Operand::Mem(m) => (Some(m), None),
+                Operand::Reg(_) => (None, None),
+            },
+        };
+        let mut gprs: Vec<u8> = Vec::with_capacity(3);
+        if let Some(m) = &mem {
+            gprs.extend(m.base);
+            gprs.extend(m.index.map(|(i, _)| i));
         }
-        // SAFETY: RIP — 64-битный регистр.
-        let rip = unsafe { values[16].Reg64 };
-        // SAFETY: FS — сегментный регистр.
-        let fs = unsafe { values[17].Segment.Base };
-        // SAFETY: GS — сегментный регистр.
-        let gs = unsafe { values[18].Segment.Base };
+        gprs.extend(extra);
+        gprs.sort_unstable();
+        gprs.dedup();
+        let segment = mem.and_then(|m| m.segment);
+
+        let mut names: Vec<RegisterName> = gprs
+            .iter()
+            .map(|&r| WHV_REGISTER_NAME(i32::from(r & 15)))
+            .collect();
+        match segment {
+            Some(SegPrefix::Fs) => names.push(WHvX64RegisterFs),
+            Some(SegPrefix::Gs) => names.push(WHvX64RegisterGs),
+            None => {}
+        }
+        let mut values = vec![RegisterValue::default(); names.len()];
+        if !names.is_empty() {
+            vcpu.get_registers(&names, &mut values)?;
+        }
+        let mut gpr = [0_u64; 16];
+        for (&r, v) in gprs.iter().zip(&values) {
+            // SAFETY: значения регистров общего назначения — 64-битные.
+            gpr[usize::from(r & 15)] = unsafe { v.Reg64 };
+        }
+        let (mut fs, mut gs) = (0, 0);
+        if let Some(v) = values.get(gprs.len()) {
+            // SAFETY: последний запрошенный регистр — сегментный (FS или GS).
+            let base = unsafe { v.Segment.Base };
+            match segment {
+                Some(SegPrefix::Fs) => fs = base,
+                Some(SegPrefix::Gs) => gs = base,
+                None => {}
+            }
+        }
+        let rip = vcpu.exit_context().VpContext.Rip;
         Ok(Self { gpr, rip, fs, gs })
     }
 }
@@ -852,7 +886,7 @@ fn handle_exception(vcpu: &mut Vcpu, bus: &mut PlatformBus, stats: &mut ExitStat
         vcpu.inject_exception(VECTOR_UD, None, 0)?;
         return Ok(());
     };
-    let ctx = EmuContext::read(vcpu)?;
+    let ctx = EmuContext::read(vcpu, &insn)?;
     let done = match insn {
         Insn::Movbe(m) => emulate_movbe(vcpu, bus, &ctx, &m)?,
         Insn::Aes(a) => {
@@ -902,24 +936,33 @@ fn xmm_name(n: u8) -> RegisterName {
     WHV_REGISTER_NAME(WHV_XMM0 + i32::from(n & 15))
 }
 
-fn read_xmm(vcpu: &Vcpu, n: u8) -> Result<[u8; 16]> {
-    let mut v = [RegisterValue::default()];
-    vcpu.get_registers(&[xmm_name(n)], &mut v)?;
-    // SAFETY: регистр XMM — 128-битный, значение инициализировано WHPX.
-    let wide = unsafe { v[0].Reg128 };
-    // SAFETY: WHV_UINT128 — объединение двух представлений одних и тех же 16 байт.
-    let half = unsafe { wide.Anonymous };
-    let (lo, hi) = (half.Low64, half.High64);
-    let mut out = [0_u8; 16];
-    out[..8].copy_from_slice(&lo.to_le_bytes());
-    out[8..].copy_from_slice(&hi.to_le_bytes());
-    Ok(out)
+fn read_xmms(vcpu: &Vcpu, regs: &[u8]) -> Result<Vec<[u8; 16]>> {
+    let names: Vec<RegisterName> = regs.iter().map(|&n| xmm_name(n)).collect();
+    let mut values = vec![RegisterValue::default(); names.len()];
+    vcpu.get_registers(&names, &mut values)?;
+    Ok(values
+        .iter()
+        .map(|v| {
+            // SAFETY: регистр XMM — 128-битный, значение инициализировано WHPX.
+            let wide = unsafe { v.Reg128 };
+            // SAFETY: WHV_UINT128 — объединение двух представлений одних и тех же 16 байт.
+            let half = unsafe { wide.Anonymous };
+            let mut out = [0_u8; 16];
+            out[..8].copy_from_slice(&half.Low64.to_le_bytes());
+            out[8..].copy_from_slice(&half.High64.to_le_bytes());
+            out
+        })
+        .collect())
 }
 
 fn emulate_aes(vcpu: &Vcpu, bus: &mut PlatformBus, ctx: &EmuContext, a: &Aes) -> Result<bool> {
     let next = ctx.rip.wrapping_add(u64::from(a.len));
-    let src = match a.src {
-        Operand::Reg(r) => read_xmm(vcpu, r)?,
+    let (dst, src) = match a.src {
+        Operand::Reg(r) => {
+            // Оба XMM одним вызовом.
+            let both = read_xmms(vcpu, &[a.dst, r])?;
+            (both[0], both[1])
+        }
         Operand::Mem(mem) => {
             let ea = mem.address(&ctx.gpr, next, ctx.fs, ctx.gs);
             let Some(chunks) = guest_chunks(vcpu, ea, 16, false)? else {
@@ -927,10 +970,9 @@ fn emulate_aes(vcpu: &Vcpu, bus: &mut PlatformBus, ctx: &EmuContext, a: &Aes) ->
             };
             let mut data = [0_u8; 16];
             read_chunks(bus, &chunks, &mut data);
-            data
+            (read_xmms(vcpu, &[a.dst])?[0], data)
         }
     };
-    let dst = read_xmm(vcpu, a.dst)?;
     let out = aesni::execute(a.op, &dst, &src);
     let mut xmm = RegisterValue::default();
     let mut lo = [0_u8; 8];

@@ -67,7 +67,7 @@ Windows Hypervisor Platform (UAC запросится только на этот
 и сложит логи в архив на рабочем столе), подробно в [docs/hardware-test.md](docs/hardware-test.md):
 
 ```powershell
-irm https://raw.githubusercontent.com/Zaxar1231/GSPC/feat/stage-3-display-input/scripts/hw-test.ps1 -OutFile $env:TEMP\hw-test.ps1
+irm https://raw.githubusercontent.com/Zaxar1231/GSPC/main/scripts/hw-test.ps1 -OutFile $env:TEMP\hw-test.ps1
 powershell -ExecutionPolicy Bypass -File $env:TEMP\hw-test.ps1
 ```
 

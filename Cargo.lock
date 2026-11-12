@@ -493,6 +493,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "rustdroid-gfxstream"
+version = "0.0.1"
+dependencies = [
+ "thiserror",
+ "tracing",
+ "windows",
+]
+
+[[package]]
 name = "rustdroid-gpu"
 version = "0.0.1"
 dependencies = [

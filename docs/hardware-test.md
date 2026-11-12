@@ -8,7 +8,7 @@
 Откройте **PowerShell** (обычный, не от администратора) и выполните:
 
 ```powershell
-irm https://raw.githubusercontent.com/Zaxar1231/GSPC/feat/stage-3-display-input/scripts/hw-test.ps1 -OutFile $env:TEMP\hw-test.ps1
+irm https://raw.githubusercontent.com/Zaxar1231/GSPC/main/scripts/hw-test.ps1 -OutFile $env:TEMP\hw-test.ps1
 powershell -ExecutionPolicy Bypass -File $env:TEMP\hw-test.ps1
 ```
 
@@ -47,7 +47,7 @@ powershell -ExecutionPolicy Bypass -File scripts\hw-test.ps1 -FromSource -SkipBu
 | `-Display` | `1280x720@60` | окно этапа 3 |
 | `-Stage2Seconds` / `-Stage3Seconds` | `300` / `600` | сколько работает ВМ |
 | `-CfBuild` / `-KernelBuild` | `latest` | номер сборки ci.android.com |
-| `-Branch` | `feat/stage-3-display-input` | ветка репозитория |
+| `-Branch` | `main` | ветка: готовая сборка `nightly-<ветка>` или исходники; для проверки незамерженного этапа — его ветка, например `feat/stage-4-3d` |
 | `-Yes` | — | не задавать вопросов (без ответов на этапе 3) |
 
 ## Что в архиве
