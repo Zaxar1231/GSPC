@@ -187,13 +187,25 @@ fn open_log(path: Option<&PathBuf>) -> Result<ConsoleOut> {
     Ok(ConsoleOut { log })
 }
 
+/// `--cpus 0` — подобрать по числу логических процессоров хоста.
+fn resolve_cpus(requested: u32) -> u32 {
+    if requested != 0 {
+        return requested;
+    }
+    let host = std::thread::available_parallelism()
+        .map_or(1, |n| u32::try_from(n.get()).unwrap_or(u32::MAX));
+    let cpus = crate::cli::auto_vcpus(host);
+    tracing::info!(host, cpus, "число vCPU подобрано под компьютер");
+    cpus
+}
+
 fn base_config(vm: &VmArgs, console: ConsoleKind, kernel: PathBuf) -> VmConfig {
     VmConfig {
         kernel,
         initrd: None,
         initrd_data: None,
         memory_mib: vm.memory,
-        cpus: vm.cpus,
+        cpus: resolve_cpus(vm.cpus),
         cmdline_extra: vm.append.clone(),
         cmdline_override: None,
         large_pages: vm.large_pages,

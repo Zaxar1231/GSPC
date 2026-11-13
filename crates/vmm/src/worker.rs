@@ -144,7 +144,7 @@ impl DeviceWorker {
 }
 
 fn run(function: &SharedFunction, queue_events: &[Event], stop: &Event) {
-    let _tuning = crate::host::tune_current_thread("Games");
+    let _tuning = crate::host::tune_current_thread(Some("Games"));
     let mut handles: Vec<HANDLE> = queue_events.iter().map(Event::handle).collect();
     handles.push(stop.handle());
     let stop_index = queue_events.len();

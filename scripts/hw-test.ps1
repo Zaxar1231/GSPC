@@ -28,6 +28,9 @@
 .PARAMETER FromSource
     Собрать из исходников вместо готового rustdroid.exe.
 
+.PARAMETER Cpus
+    Число vCPU гостя; 0 (по умолчанию) — rustdroid подберёт сам, оставив часть ядер хосту.
+
 .PARAMETER Gpu
     Графика этапа 3: auto (по умолчанию: gfxstream, если проверка 3D прошла, иначе software),
     gfxstream или software.
@@ -41,7 +44,7 @@ param(
     [string]$Branch = 'main',
     [string]$RepoDir = '',
     [int]$Memory = 4096,
-    [int]$Cpus = 4,
+    [int]$Cpus = 0,
     [string]$Display = '1280x720@60',
     [int]$Stage1Seconds = 30,
     [int]$Stage2Seconds = 300,
@@ -522,7 +525,7 @@ function Test-Stage1([string]$Name, [int]$N) {
 if ($Stages -contains 1 -and $kernel -and (Test-Path $Exe)) {
     Step 'Этап 1: ядро Linux + busybox'
     Test-Stage1 'stage1' 1
-    Test-Stage1 'stage1-smp' ([math]::Min($Cpus, 4))
+    Test-Stage1 'stage1-smp' $(if ($Cpus -gt 0) { [math]::Min($Cpus, 4) } else { 4 })
 }
 
 # ------------------------------------------------------------ этап 2 ---

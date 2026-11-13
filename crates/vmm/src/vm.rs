@@ -715,7 +715,7 @@ impl Vm {
                     std::thread::Builder::new()
                         .name(format!("vcpu{}", vcpu.index()))
                         .spawn_scoped(scope, move || {
-                            let _tuning = crate::host::tune_current_thread("Games");
+                            let _tuning = crate::host::tune_current_thread(None);
                             let r = run_loop(&mut vcpu, &mut bus, events, stop, cpuid);
                             stopper.stop();
                             r
@@ -724,7 +724,7 @@ impl Vm {
                 .collect();
             let mut results = Vec::new();
             if let Some(mut vcpu) = bsp {
-                let _tuning = crate::host::tune_current_thread("Games");
+                let _tuning = crate::host::tune_current_thread(None);
                 let mut bus = self.bus();
                 results.push(run_loop(
                     &mut vcpu,
