@@ -25,6 +25,16 @@ pub trait GuestMemory: Send + Sync {
     /// # Errors
     /// Если диапазон вне RAM.
     fn write(&self, gpa: u64, buf: &[u8]) -> Result<(), MemoryError>;
+
+    /// Указатель хоста на непрерывный диапазон `[gpa, gpa + len)` гостевой RAM.
+    ///
+    /// Нужен нативным библиотекам, которые читают память гостя сами (gfxstream получает
+    /// backing ресурсов как `iovec`). Указатель действителен, пока жива память; доступ к нему
+    /// идёт параллельно с гостем, как у DMA реального устройства. `None` — диапазон вне RAM
+    /// или реализация не даёт прямого доступа (память для тестов).
+    fn host_range(&self, _gpa: u64, _len: usize) -> Option<std::ptr::NonNull<u8>> {
+        None
+    }
 }
 
 /// Чтение и запись чисел little-endian поверх [`GuestMemory`].

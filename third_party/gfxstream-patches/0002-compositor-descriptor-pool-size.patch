@@ -1,0 +1,22 @@
+diff --git a/host/vulkan/compositor_vk.cpp b/host/vulkan/compositor_vk.cpp
+index 5eacac9..5b71049 100644
+--- a/host/vulkan/compositor_vk.cpp
++++ b/host/vulkan/compositor_vk.cpp
+@@ -490,7 +490,7 @@ bool CompositorVk::setUpDescriptorSets() {
+     const uint32_t uniformBufferDescriptorsPerLayer = m_formatResources.size();
+     const uint32_t uniformBufferDescriptorsTotal =
+         (uniformBufferDescriptorsPerLayer * kMaxLayersPerFrame * m_maxFramesInFlight) +
+-        (uniformBufferDescriptorsPerLayer * kMaxImmediateDrawsPerFrame);
++        (uniformBufferDescriptorsPerLayer * kMaxImmediateDrawsPerFrame * m_maxFramesInFlight);
+ 
+     // Each format option has a descriptor set with 1 logical sampler descriptor
+     // (i.e. 1 `sampler2D`) but vulkan implementations may use multiple underlying
+@@ -519,7 +519,7 @@ bool CompositorVk::setUpDescriptorSets() {
+     }
+     const uint32_t imageSamplerDescriptorsTotal =
+         (imageSamplerDescriptorsPerLayer * kMaxLayersPerFrame * m_maxFramesInFlight) +
+-        (imageSamplerDescriptorsPerLayer * kMaxImmediateDrawsPerFrame);
++        (imageSamplerDescriptorsPerLayer * kMaxImmediateDrawsPerFrame * m_maxFramesInFlight);
+ 
+     const uint32_t descriptorSetsPerLayer = m_formatResources.size();
+     const uint32_t descriptorSetsPerFrame =

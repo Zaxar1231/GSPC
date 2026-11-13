@@ -467,6 +467,7 @@ dependencies = [
  "anyhow",
  "clap",
  "rustdroid-devices",
+ "rustdroid-gfxstream",
  "rustdroid-gpu",
  "rustdroid-input",
  "rustdroid-instance",
@@ -505,7 +506,9 @@ dependencies = [
 name = "rustdroid-gpu"
 version = "0.0.1"
 dependencies = [
+ "rustdroid-gfxstream",
  "rustdroid-virtio",
+ "thiserror",
  "tracing",
 ]
 

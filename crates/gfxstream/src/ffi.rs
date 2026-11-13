@@ -210,6 +210,10 @@ pub mod flags {
     pub const USE_EGL: u32 = 1 << 0;
     /// Синхронизация потоков.
     pub const THREAD_SYNC: u32 = 1 << 1;
+    /// GLX.
+    pub const USE_GLX: u32 = 1 << 2;
+    /// Без окна (рендер во внеэкранные буферы).
+    pub const USE_SURFACELESS: u32 = 1 << 3;
     /// GLES.
     pub const USE_GLES: u32 = 1 << 4;
     /// Vulkan.

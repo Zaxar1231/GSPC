@@ -23,15 +23,93 @@ D3D11 ([ADR 0009](adr/0009-weak-gpu-support.md)).
 | # | Задача | Проверка | Статус |
 |---|---|---|---|
 | 4.0 | Ускорение программного выполнения `MOVBE`/AES-NI: читать из WHPX только нужные регистры | меньше нагрузка на i3-3220 | 🚧 |
-| 4.1 | Сборка gfxstream (хостовая часть) под Windows в GitHub Actions, публикация DLL | DLL собирается в CI | 🚧 |
+| 4.1 | Сборка gfxstream (хостовая часть) под Windows в GitHub Actions, публикация DLL | DLL собирается в CI | ✅ |
 | 4.2 | `rustdroid-gfxstream`: загрузка DLL, безопасная обёртка над C API `stream_renderer_*` | тесты обёртки, `rustdroid check` видит DLL | 🚧 |
-| 4.3 | virtio-gpu 3D: `CONTEXT_INIT`, capsets, контексты, `SUBMIT_3D`, blob-ресурсы, общая память (shm BAR), фенсы по контекстам | unit-тесты протокола | ⏳ |
-| 4.4 | Параметры гостя для gfxstream (`gpu_mode=gfxstream` у Cuttlefish), выбор уровня графики | загрузочная анимация через GPU | ⏳ |
+| 4.3 | virtio-gpu 3D: `CONTEXT_INIT`, capsets, контексты, `SUBMIT_3D`, blob-ресурсы, фенсы по контекстам | unit-тесты протокола | ✅ |
+| 4.3b | Общая память (shm-область PCI) для `RESOURCE_MAP_BLOB`: host-visible blob-ресурсы, нужные Vulkan гостя | unit-тесты, отображение в WHPX | ✅ (железо — в 4.4) |
+| 4.4 | Параметры гостя для gfxstream (`gpu_mode=gfxstream` у Cuttlefish), выбор уровня графики | загрузочная анимация через GPU | ✅ i3-10110U: Android загружается за 49 с, ввод работает |
 | 4.5 | Zero-copy: Vulkan-образ gfxstream → NT handle → `OpenSharedHandle` в D3D12 | нет копии кадра через CPU | ⏳ |
 | 4.6 | Уровень 2: gfxstream поверх ANGLE-on-D3D11 для GPU без Vulkan | i3-3220 рисует на видеокарте | ⏳ |
-| 4.7 | Шейдерный проход композитора: letterbox (сохранение пропорций), масштабирование | пропорции при любом размере окна | ⏳ |
+| 4.7 | Шейдерный проход композитора: letterbox (сохранение пропорций), масштабирование | пропорции при любом размере окна | 🚧 сделано, ждёт проверки на железе |
 | 4.8 | Кэш шейдеров и пайплайнов на диске, VSync от хоста, VRR | нет статтеров при повторном запуске | ⏳ |
 | 4.9 | Замеры: FPS, 1% low, время кадра на ноутбуке и i3-3220 до/после | таблица в этом документе | ⏳ |
+
+## Сделано
+
+**4.1.** Workflow `gfxstream` собирает `gfxstream_backend.dll` (≈6,7 МБ) из коммита
+`google/gfxstream`, указанного в `GFXSTREAM_COMMIT`. Для Windows понадобились
+`WIN32_LEAN_AND_MEAN` (конфликт `winsock.h`/`winsock2.h` в новых SDK) и патч
+`0001-vk-getReason-c_str.patch`. DLL экспортирует весь C API `stream_renderer_*`, которым
+пользуется обёртка, и зависит только от системных DLL и рантайма Visual C++ 2015–2022.
+
+**4.3.** Протокол 3D в `crates/gpu/src/device.rs`, исполнитель — трейт
+`rustdroid_gpu::Backend3d`:
+
+- устройство с бэкендом объявляет `VIRGL`, `RESOURCE_BLOB`, `CONTEXT_INIT` и число capsets;
+- `GET_CAPSET_INFO`/`GET_CAPSET`, `CTX_CREATE` (тип контекста из `context_init`),
+  `CTX_DESTROY`, `CTX_ATTACH/DETACH_RESOURCE`, `RESOURCE_CREATE_3D`,
+  `TRANSFER_TO/FROM_HOST_3D`, `SUBMIT_3D` (входные фенсы пропускаются), `RESOURCE_CREATE_BLOB`,
+  `SET_SCANOUT_BLOB`; `ATTACH/DETACH_BACKING`, `UNREF`, `TRANSFER_TO_HOST_2D`, `SET_SCANOUT` и
+  `RESOURCE_FLUSH` работают и с 3D-ресурсами (так ядро создаёт dumb-буферы при `VIRGL`);
+- команда с `VIRTIO_GPU_FLAG_FENCE` получает ответ сразу, но в used ring попадает только после
+  того, как бэкенд сообщит о фенсе через `FenceSink` (из любого потока; приёмник будит worker
+  устройства). Фенс с `INFO_RING_IDX` завершает команды своего контекста и кольца с номером не
+  больше, без него — глобальную шкалу;
+- `reset` освобождает ресурсы и контексты у бэкенда;
+- `rustdroid_gpu::gfxstream::GfxstreamBackend` переводит это в `stream_renderer_*`: backing
+  ресурсов — `iovec` с указателями на гостевую RAM (`GuestMemory::host_range`), кадр
+  scanout-ресурса читается `transfer_read_iov` в буфер хоста.
+
+Ограничения: `RESOURCE_MAP_BLOB` отвечает ошибкой, пока нет shm-области (4.3b); кадр 3D
+копируется через CPU (до 4.5); в эмуляторе устройство с бэкендом ещё не включается (4.4).
+Проверка — 10 unit-тестов протокола на заглушке бэкенда; на реальном gfxstream проверится на
+железе в 4.4.
+
+**4.3b.** Область общей памяти virtio-gpu — 64-битный prefetchable BAR2 (4 ГиБ) с capability
+`VIRTIO_PCI_CAP_SHARED_MEMORY_CFG` (`shmid` 1, host-visible). BAR лежит в окне 32–40 ГиБ:
+ниже 64 ГиБ, потому что у старых CPU (i3-3220) физический адрес 36-битный; окно объявлено в
+`_CRS` корневого моста ACPI (`QWordMemory`), иначе ядро не примет BAR. RAM гостя ограничена,
+чтобы не заходить в окно (до 29 ГиБ).
+
+`RESOURCE_MAP_BLOB`: бэкенд отображает blob на хосте (`stream_renderer_resource_map`; память
+выделяет gfxstream с выравниванием на страницу — функция `VulkanAllocateHostMemory`), устройство
+проверяет выравнивание, границы и пересечения и отображает её в BAR2 через `WHvMapGpaRange`.
+`map_info` (кэшируемость) передаётся гостю как есть. Отображения снимаются при `UNMAP_BLOB`,
+`RESOURCE_UNREF`, сбросе устройства и до удаления бэкенда.
+
+**4.4.** `boot-android --display … --gpu gfxstream`: gfxstream запускается на Vulkan без окна
+(`USE_VK | USE_SURFACELESS`), virtio-gpu получает 3D-бэкенд и общую память, фенсы будят worker
+устройства. Параметры гостя — как `gpu_mode=gfxstream_guest_angle` у Cuttlefish: ANGLE поверх
+Vulkan, Vulkan — драйвер gfxstream `ranchu`, клиентская композиция, кадр через DRM virtio-gpu
+(на хосте пока читается через CPU). Если gfxstream не запустился, `boot-android` завершается с
+ошибкой: параметры гостя уже выбраны под gfxstream. По умолчанию `--gpu software` (этап 3).
+`hw-test.ps1 -Gpu auto` берёт gfxstream, если его прошла проверка 3D.
+
+**4.4 на железе.** На Intel UHD (драйвер 27.20.100.8984, Vulkan 1.2) понадобились патчи
+gfxstream 0003–0006: у драйвера нет synchronization2 и `vkQueueSubmit2`, а функции core 1.3
+есть только под именами расширений; `vkCmdBindVertexBuffers2EXT` в драйвере падает, поэтому
+`VK_EXT_extended_dynamic_state(2)` гостю не показывается (подробности —
+`third_party/gfxstream-patches/README.md`). После этого Android загружается до
+`sys.boot_completed` за 49 с с чистого диска, ANGLE в госте работает на
+«Vulkan 1.2.154 (Virtio-GPU GFXStream (Intel UHD Graphics))». FPS пока низкий — разбор в
+профиле (строки `профиль CPU` и `время команд virtio-gpu` в логе).
+
+**4.7.** Композитор рисует кадр шейдерным проходом (`crates/present/src/blit.rs`): кадр
+копируется в текстуру, back buffer — размера окна, кадр вписывается с сохранением пропорций
+(`layout::fit`) с билинейной фильтрацией, поля чёрные. Касания пересчитываются через тот же
+прямоугольник (`layout::to_frame`): клик по полю попадает на ближний край экрана. Шейдеры
+компилируются при запуске (`D3DCompile`); если конвейер не создался, остаётся прежняя копия с
+растяжением DXGI, и касания считаются по всему окну.
+
+## Проверки на железе
+
+`hw-test.ps1 -CheckOnly` (Vulkan хоста и запуск gfxstream на Vulkan, без Android):
+
+| Машина | Vulkan | gfxstream | Примечание |
+|---|---|---|---|
+| i3-10110U, Intel UHD, драйвер 27.20.100.8984 | 1.2.154 | ✅ после патча 0002; capsets vulkan (116 Б), gles, composer | до патча: `VK_ERROR_OUT_OF_POOL_MEMORY` в композиторе → `abort` |
+| i5-8300H | — | — | не проверено |
+| i3-3220, Intel HD 2500 | — | — | не проверено (ожидается: нет Vulkan) |
 
 ## Риски
 

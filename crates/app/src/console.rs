@@ -187,13 +187,25 @@ fn open_log(path: Option<&PathBuf>) -> Result<ConsoleOut> {
     Ok(ConsoleOut { log })
 }
 
+/// `--cpus 0` — подобрать по числу логических процессоров хоста.
+fn resolve_cpus(requested: u32) -> u32 {
+    if requested != 0 {
+        return requested;
+    }
+    let host = std::thread::available_parallelism()
+        .map_or(1, |n| u32::try_from(n.get()).unwrap_or(u32::MAX));
+    let cpus = crate::cli::auto_vcpus(host);
+    tracing::info!(host, cpus, "число vCPU подобрано под компьютер");
+    cpus
+}
+
 fn base_config(vm: &VmArgs, console: ConsoleKind, kernel: PathBuf) -> VmConfig {
     VmConfig {
         kernel,
         initrd: None,
         initrd_data: None,
         memory_mib: vm.memory,
-        cpus: vm.cpus,
+        cpus: resolve_cpus(vm.cpus),
         cmdline_extra: vm.append.clone(),
         cmdline_override: None,
         large_pages: vm.large_pages,
@@ -216,7 +228,9 @@ fn run_vm(cfg: &VmConfig, mut devices: VmDevices, vm: &VmArgs, console: ConsoleK
         .map(DisplaySpec::parse)
         .transpose()
         .map_err(anyhow::Error::msg)?;
-    let screen = display.map(|d| display::attach(&mut devices, d));
+    let screen = display
+        .map(|d| display::attach(&mut devices, d, vm.gpu))
+        .transpose()?;
 
     let machine = Vm::new(cfg, devices, Box::new(out)).context("не удалось создать ВМ")?;
     tracing::info!(cmdline = machine.cmdline(), "командная строка ядра");
@@ -355,8 +369,9 @@ pub(crate) fn boot_android(args: &AndroidArgs) -> Result<()> {
     let mut bootconfig =
         rustdroid_bootconfig(&vendor_img.bootconfig, "pci0000:00/0000:00:01.0", "hvc0");
     if let Some(spec) = args.vm.display.as_deref() {
-        // Программный рендер в госте (SwiftShader/ANGLE) и композитор через DRM virtio-gpu.
-        for (k, v) in display::GUEST_SWIFTSHADER {
+        // Графика гостя: программный рендер (SwiftShader/ANGLE) или gfxstream (ANGLE поверх
+        // Vulkan хоста); композитор — через DRM virtio-gpu.
+        for (k, v) in display::guest_bootconfig(args.vm.gpu) {
             bootconfig.set(k, v);
         }
         // Частота vsync композитора ranchu — частота дисплея гостя.

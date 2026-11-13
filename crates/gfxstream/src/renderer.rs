@@ -460,6 +460,33 @@ impl Renderer {
         check("stream_renderer_transfer_iov", code)
     }
 
+    /// Читает область ресурса в буфер хоста `out` (не в backing гостя).
+    ///
+    /// # Errors
+    /// Ошибка gfxstream.
+    pub fn transfer_read_into(&self, t: &Transfer, out: &mut [u8]) -> Result<()> {
+        let mut region = t.region;
+        let mut iov = ffi::iovec {
+            iov_base: out.as_mut_ptr().cast(),
+            iov_len: out.len(),
+        };
+        // SAFETY: iov описывает `out`, который заимствован на время вызова; gfxstream пишет
+        // в него не больше `iov_len` байт и не сохраняет указатель после возврата.
+        check("stream_renderer_transfer_read_iov", unsafe {
+            (self.lib.transfer_read_iov)(
+                t.handle,
+                t.ctx_id,
+                t.level,
+                t.stride,
+                t.layer_stride,
+                &raw mut region,
+                t.offset,
+                &raw mut iov,
+                1,
+            )
+        })
+    }
+
     /// Создаёт blob-ресурс.
     ///
     /// # Safety

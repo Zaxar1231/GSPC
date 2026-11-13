@@ -25,6 +25,18 @@ pub(crate) enum Command {
     Boot(BootArgs),
     /// Загрузить Android из каталога образов Cuttlefish x86_64.
     BootAndroid(AndroidArgs),
+    /// Проверка 3D (Vulkan и gfxstream) в отдельном процессе; её запускает `check`.
+    #[command(hide = true)]
+    GpuProbe,
+}
+
+/// Графика гостя.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub(crate) enum GpuMode {
+    /// Программный рендер в госте, virtio-gpu 2D.
+    Software,
+    /// 3D на видеокарте хоста: gfxstream, в госте ANGLE поверх Vulkan.
+    Gfxstream,
 }
 
 /// Куда направлять ввод с клавиатуры.
@@ -36,6 +48,19 @@ pub(crate) enum ConsoleKind {
     Hvc,
 }
 
+/// Сколько vCPU дать гостю на хосте с `host` логическими процессорами: хосту остаётся
+/// четверть, но не меньше двух (gfxstream и драйвер видеокарты работают на хосте, пока гость
+/// ждёт их ответа), гостю — от 1 до 8.
+#[must_use]
+#[cfg_attr(
+    not(windows),
+    allow(dead_code, reason = "ВМ запускается только в Windows-сборке")
+)]
+pub(crate) fn auto_vcpus(host: u32) -> u32 {
+    let reserve = (host / 4).max(2);
+    host.saturating_sub(reserve).clamp(1, 8)
+}
+
 /// Общие параметры ВМ.
 #[derive(Debug, Args)]
 pub(crate) struct VmArgs {
@@ -43,7 +68,8 @@ pub(crate) struct VmArgs {
     #[arg(long, default_value_t = 2048)]
     pub memory: u64,
 
-    /// Число vCPU.
+    /// Число vCPU; 0 — подобрать под компьютер (часть логических процессоров остаётся
+    /// gfxstream, драйверу видеокарты и окну).
     #[arg(long, default_value_t = 1)]
     pub cpus: u32,
 
@@ -71,6 +97,11 @@ pub(crate) struct VmArgs {
     /// Окно с экраном гостя: virtio-gpu + virtio-input, `ШИРИНАxВЫСОТА@ГЦ` (например 1920x1080@120).
     #[arg(long)]
     pub display: Option<String>,
+
+    /// Графика гостя в окне: `software` — программный рендер в госте (SwiftShader), `gfxstream`
+    /// — 3D на видеокарте хоста через gfxstream (нужна gfxstream_backend.dll и Vulkan).
+    #[arg(long, value_enum, default_value_t = GpuMode::Software)]
+    pub gpu: GpuMode,
 
     /// Выводить без VSync (tearing; для VRR/G-Sync/FreeSync).
     #[arg(long)]
@@ -249,6 +280,13 @@ mod tests {
         assert_eq!(b.kernel, PathBuf::from("bzImage"));
         assert_eq!(b.vm.memory, 1024);
         assert_eq!(b.vm.cpus, 4);
+        assert_eq!(auto_vcpus(1), 1);
+        assert_eq!(auto_vcpus(2), 1);
+        assert_eq!(auto_vcpus(4), 2);
+        assert_eq!(auto_vcpus(8), 6);
+        assert_eq!(auto_vcpus(6), 4);
+        assert_eq!(auto_vcpus(12), 8);
+        assert_eq!(auto_vcpus(32), 8);
         assert_eq!(b.vm.console, ConsoleKind::Hvc);
         assert_eq!(b.disks.len(), 2);
     }

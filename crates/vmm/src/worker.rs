@@ -125,6 +125,16 @@ impl DeviceWorker {
         })
     }
 
+    /// Функция, которая будит обработку очереди из любого потока (фенсы gfxstream).
+    pub fn kicker(&self, queue: usize) -> impl Fn() + Send + Sync + 'static {
+        let events = Arc::clone(&self.queue_events);
+        move || {
+            if let Some(ev) = events.get(queue) {
+                ev.set();
+            }
+        }
+    }
+
     /// Будит обработку очереди (например, при новом вводе консоли).
     pub fn kick(&self, queue: usize) {
         if let Some(ev) = self.queue_events.get(queue) {
@@ -134,7 +144,7 @@ impl DeviceWorker {
 }
 
 fn run(function: &SharedFunction, queue_events: &[Event], stop: &Event) {
-    let _tuning = crate::host::tune_current_thread("Games");
+    let _tuning = crate::host::tune_current_thread(Some("Games"));
     let mut handles: Vec<HANDLE> = queue_events.iter().map(Event::handle).collect();
     handles.push(stop.handle());
     let stop_index = queue_events.len();

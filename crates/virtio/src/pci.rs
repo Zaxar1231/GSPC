@@ -11,6 +11,10 @@
 //! | 0x4000 | таблица MSI-X |
 //! | 0x5000 | MSI-X PBA |
 //!
+//! Если у устройства есть область общей памяти ([`VirtioDevice::shared_memory_region`]), она
+//! объявляется 64-битным prefetchable BAR2 и capability `VIRTIO_PCI_CAP_SHARED_MEMORY_CFG`.
+//! Обращения к BAR2 транспорт не обрабатывает: устройство отображает туда память хоста само.
+//!
 //! Notify-адреса очередей регистрируются как doorbell-события WHPX: запись гостя будит worker
 //! устройства без выхода vCPU в user mode. Без doorbell (тесты) уведомление обрабатывается
 //! синхронно через [`VirtioPci::bar_write`].
@@ -48,6 +52,11 @@ const CAP_COMMON: u64 = 0x4C;
 const CAP_ISR: u64 = 0x5C;
 const CAP_DEVICE: u64 = 0x6C;
 const CAP_NOTIFY: u64 = 0x7C;
+const CAP_SHM: u64 = 0x90;
+/// `VIRTIO_PCI_CAP_SHARED_MEMORY_CFG`.
+const CFG_TYPE_SHM: u8 = 8;
+/// Флаги BAR памяти: 64-битный (биты 2:1 = 10), prefetchable (бит 3).
+const BAR_MEM64_PREFETCH: u32 = 0x0C;
 const CONFIG_SIZE: usize = 256;
 
 const STATUS_DRIVER_OK: u8 = 4;
@@ -63,6 +72,11 @@ pub struct VirtioPci {
     config: [u8; CONFIG_SIZE],
     bar0: u32,
     bar_sizing: bool,
+    /// Область общей памяти: `shmid` и размер.
+    shm: Option<(u8, u64)>,
+    bar2: u64,
+    /// Идёт определение размера BAR2: младшее и старшее слово.
+    bar2_sizing: [bool; 2],
     device_feature_select: u32,
     driver_feature_select: u32,
     driver_features: u64,
@@ -123,7 +137,13 @@ impl VirtioPci {
             .collect();
         #[allow(clippy::cast_possible_truncation, reason = "очередей — единицы")]
         let vectors = (queues.len() + 1) as u16;
+        let shm = device
+            .shared_memory_region()
+            .filter(|&(_, len)| len.is_power_of_two() && len >= 0x1000);
         let mut pci = Self {
+            shm,
+            bar2: 0,
+            bar2_sizing: [false; 2],
             device,
             queues,
             msix: MsixTable::new(vectors),
@@ -191,8 +211,49 @@ impl VirtioPci {
         virtio_cap(CAP_ISR, CAP_DEVICE, 3, ISR_OFFSET, 4, 16);
         virtio_cap(CAP_DEVICE, CAP_NOTIFY, 4, DEVICE_OFFSET, 0x1000, 16);
         let notify_len = self.queues.len() as u64 * u64::from(NOTIFY_MULTIPLIER);
-        virtio_cap(CAP_NOTIFY, 0, 2, NOTIFY_OFFSET, notify_len.max(4), 20);
+        let notify_next = if self.shm.is_some() { CAP_SHM } else { 0 };
+        virtio_cap(
+            CAP_NOTIFY,
+            notify_next,
+            2,
+            NOTIFY_OFFSET,
+            notify_len.max(4),
+            20,
+        );
         put(c, CAP_NOTIFY + 16, &NOTIFY_MULTIPLIER.to_le_bytes());
+        if let Some((id, len)) = self.shm {
+            // virtio_pci_cap64: BAR 2, смещение 0, длина (младшие и старшие 32 бита).
+            put(c, CAP_SHM, &[0x09, 0, 24, CFG_TYPE_SHM, 2, id, 0, 0]);
+            put(c, CAP_SHM + 8, &0_u32.to_le_bytes());
+            #[allow(
+                clippy::cast_possible_truncation,
+                reason = "длина разложена на два слова"
+            )]
+            {
+                put(c, CAP_SHM + 12, &(len as u32).to_le_bytes());
+                put(c, CAP_SHM + 16, &0_u32.to_le_bytes());
+                put(c, CAP_SHM + 20, &((len >> 32) as u32).to_le_bytes());
+            }
+        }
+    }
+
+    /// Размер области общей памяти (BAR2), если она есть.
+    #[must_use]
+    pub fn shm_size(&self) -> Option<u64> {
+        self.shm.map(|(_, len)| len)
+    }
+
+    /// Назначает адрес BAR2 (заранее, как прошивка). Адрес выравнивается на размер области.
+    pub fn set_shm_base(&mut self, gpa: u64) {
+        if let Some((_, len)) = self.shm {
+            self.bar2 = gpa & !(len - 1);
+        }
+    }
+
+    /// Текущий адрес BAR2 (0 — нет области или не назначен).
+    #[must_use]
+    pub fn shm_base(&self) -> u64 {
+        self.bar2
     }
 
     /// Адрес BAR0.
@@ -237,6 +298,21 @@ impl VirtioPci {
         }
         let mut c = self.config;
         put(&mut c, 0x10, &self.bar0.to_le_bytes());
+        if let Some((_, len)) = self.shm {
+            // При определении размера слово BAR читается как маска размера.
+            let mask = !(len - 1);
+            let pick = |sizing: bool| if sizing { mask } else { self.bar2 };
+            #[allow(
+                clippy::cast_possible_truncation,
+                reason = "BAR2 разложен на два слова"
+            )]
+            let (lo, hi) = (
+                pick(self.bar2_sizing[0]) as u32 | BAR_MEM64_PREFETCH,
+                (pick(self.bar2_sizing[1]) >> 32) as u32,
+            );
+            put(&mut c, 0x18, &lo.to_le_bytes());
+            put(&mut c, 0x1C, &hi.to_le_bytes());
+        }
         let mut ctrl = u16::from_le_bytes([c[CAP_MSIX as usize + 2], c[CAP_MSIX as usize + 3]]);
         if self.msix.enabled {
             ctrl |= 1 << 15;
@@ -266,6 +342,22 @@ impl VirtioPci {
                     #[allow(clippy::cast_possible_truncation, reason = "BAR 32-битный")]
                     let mask = !(BAR_SIZE as u32 - 1);
                     self.bar0 = v & mask;
+                }
+            }
+            0x18 | 0x1C if self.shm.is_some() => {
+                let v = to_u64(data) as u32;
+                let hi = offset == 0x1C;
+                let i = usize::from(hi);
+                if v == 0xFFFF_FFFF {
+                    self.bar2_sizing[i] = true;
+                } else {
+                    self.bar2_sizing[i] = false;
+                    let mask = self.shm.map_or(0, |(_, len)| !(len - 1));
+                    self.bar2 = if hi {
+                        (self.bar2 & 0xFFFF_FFFF) | (u64::from(v) << 32)
+                    } else {
+                        (self.bar2 & !0xFFFF_FFFF) | u64::from(v)
+                    } & mask;
                 }
             }
             o if o == CAP_MSIX + 2 || o == CAP_MSIX + 3 => {
@@ -667,6 +759,80 @@ mod tests {
         p.config_read(0x10, &mut b);
         assert_eq!(u32::from_le_bytes(b), 0xD000_0000);
         assert_eq!(p.notify_address(0), 0xD000_3000);
+    }
+
+    /// Устройство с областью общей памяти 4 ГиБ.
+    struct WithShm([u16; 1]);
+    impl VirtioDevice for WithShm {
+        fn device_type(&self) -> u32 {
+            crate::device::TYPE_GPU
+        }
+        fn device_features(&self) -> u64 {
+            0
+        }
+        fn queue_max_sizes(&self) -> &[u16] {
+            &self.0
+        }
+        fn read_config(&self, _: u64, data: &mut [u8]) {
+            data.fill(0);
+        }
+        fn shared_memory_region(&self) -> Option<(u8, u64)> {
+            Some((1, 4 << 30))
+        }
+        fn process_queue(
+            &mut self,
+            _: usize,
+            _: &mut Queue,
+            _: &dyn GuestMemory,
+        ) -> Result<bool, QueueError> {
+            Ok(false)
+        }
+    }
+
+    fn cfg32(p: &VirtioPci, off: u64) -> u32 {
+        let mut b = [0_u8; 4];
+        p.config_read(off, &mut b);
+        u32::from_le_bytes(b)
+    }
+
+    #[test]
+    fn shared_memory_bar_and_capability() {
+        let mem = Arc::new(VecMemory::new(0x1000));
+        let mut p = VirtioPci::new(
+            Box::new(WithShm([4])),
+            0xC000_0000,
+            mem,
+            Arc::new(Sink::default()),
+        );
+        assert_eq!(p.shm_size(), Some(4 << 30));
+        p.set_shm_base(0x8_0000_0000);
+        assert_eq!((cfg32(&p, 0x18), cfg32(&p, 0x1C)), (0x0C, 0x8));
+        // Определение размера: маска в обоих словах, флаги сохраняются.
+        p.config_write(0x18, &0xFFFF_FFFF_u32.to_le_bytes());
+        p.config_write(0x1C, &0xFFFF_FFFF_u32.to_le_bytes());
+        assert_eq!((cfg32(&p, 0x18), cfg32(&p, 0x1C)), (0x0C, 0xFFFF_FFFF));
+        // Новый адрес.
+        p.config_write(0x18, &0_u32.to_le_bytes());
+        p.config_write(0x1C, &0x9_u32.to_le_bytes());
+        assert_eq!(p.shm_base(), 0x9_0000_0000);
+        // Capability общей памяти в конце списка.
+        let mut caps = Vec::new();
+        let mut at = u64::from(cfg32(&p, 0x34) & 0xFF);
+        while at != 0 {
+            let w = cfg32(&p, at);
+            caps.push((at, w & 0xFF, (w >> 24) & 0xFF));
+            at = u64::from((w >> 8) & 0xFF);
+        }
+        assert_eq!(caps.last(), Some(&(CAP_SHM, 0x09, u32::from(CFG_TYPE_SHM))));
+        assert_eq!(cfg32(&p, CAP_SHM + 4) & 0xFFFF, 0x0102); // bar 2, shmid 1
+        assert_eq!((cfg32(&p, CAP_SHM + 12), cfg32(&p, CAP_SHM + 20)), (0, 1));
+    }
+
+    #[test]
+    fn no_shared_memory_bar_by_default() {
+        let (p, ..) = setup();
+        assert_eq!(p.shm_size(), None);
+        assert_eq!((cfg32(&p, 0x18), cfg32(&p, 0x1C)), (0, 0));
     }
 
     #[test]
