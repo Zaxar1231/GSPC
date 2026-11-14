@@ -10,6 +10,9 @@
 
 ### Added
 
+- `--console-input-delay N`: ввод консоли (stdin) передаётся гостю через N секунд — ранний ввод
+  терминал гостя теряет до запуска shell. `hw-test.ps1` передаёт 30 с, чтобы `top` из консоли
+  гостя действительно запускался.
 - Уровень графики 2 для видеокарт без Vulkan (этап 4.6, первый вариант): `--gpu gfxstream-gl` —
   gfxstream на OpenGL драйвера (WGL), в госте драйвер GLES gfxstream. `rustdroid check` проверяет
   OpenGL, если Vulkan не запустился; `hw-test.ps1 -Gpu auto` выбирает его сам.

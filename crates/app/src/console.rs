@@ -131,10 +131,13 @@ impl InputTarget {
 }
 
 /// Поток ввода: клавиатура → гость. `Ctrl+A X` — остановить ВМ, `Ctrl+A Ctrl+A` — передать Ctrl+A.
-fn spawn_input(target: InputTarget, stopper: Stopper) -> std::io::Result<()> {
+fn spawn_input(target: InputTarget, stopper: Stopper, delay: Duration) -> std::io::Result<()> {
     std::thread::Builder::new()
         .name("console-input".into())
         .spawn(move || {
+            if !delay.is_zero() {
+                std::thread::sleep(delay);
+            }
             let mut stdin = std::io::stdin().lock();
             let mut buf = [0_u8; 256];
             let mut escape = false;
@@ -241,7 +244,12 @@ fn run_vm(cfg: &VmConfig, mut devices: VmDevices, vm: &VmArgs, console: ConsoleK
         _ => InputTarget::Serial(machine.serial()),
     };
     let raw = RawConsole::enable();
-    spawn_input(target, machine.stopper()).context("не удалось запустить поток ввода")?;
+    spawn_input(
+        target,
+        machine.stopper(),
+        Duration::from_secs(vm.console_input_delay),
+    )
+    .context("не удалось запустить поток ввода")?;
     if vm.timeout > 0 {
         spawn_timeout(vm.timeout, machine.stopper()).context("не удалось запустить таймер")?;
     }

@@ -610,7 +610,8 @@ if ($Stages -contains 3 -and $images -and (Test-Path $Exe)) {
     $stage3Start = Get-Date
     $stage3Args = @('boot-android', '--images', $images, '--instance', 'hwtest',
         '--memory', "$Memory", '--cpus', "$Cpus", '--display', $Display, '--timeout', "$Stage3Seconds",
-        '--gpu', $gpuMode, '--serial-log', $serial, '--logcat', (Join-Path $Out 'stage3-logcat.txt'), '-v')
+        '--gpu', $gpuMode, '--serial-log', $serial, '--logcat', (Join-Path $Out 'stage3-logcat.txt'),
+        '--console-input-delay', '30', '-v')
     # Без этапа 2 инстанс не сбрасывался: после аварийно завершённых прогонов на /metadata
     # оставались пустые файлы флагов aconfig, и system_server падал по кругу.
     if ($Stages -notcontains 2 -and -not $KeepInstance) { $stage3Args += '--reset' }
