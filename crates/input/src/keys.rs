@@ -40,6 +40,28 @@ pub fn linux_keycode(scancode: u16, extended: bool) -> Option<u16> {
     })
 }
 
+/// `KEY_BACK` — «Назад» в Android.
+pub const KEY_BACK: u16 = 158;
+/// `KEY_HOMEPAGE` — «Домой» в Android.
+pub const KEY_HOMEPAGE: u16 = 172;
+/// `KEY_APPSELECT` — «Недавние приложения» в Android.
+pub const KEY_APPSELECT: u16 = 580;
+
+/// Навигационные горячие клавиши окна: Esc — «Назад», F2 — «Домой», F3 — «Недавние».
+/// Остальные клавиши — `None` (идут в гостя как есть, через [`linux_keycode`]).
+#[must_use]
+pub fn nav_shortcut(scancode: u16, extended: bool) -> Option<u16> {
+    if extended {
+        return None;
+    }
+    match scancode & 0xFF {
+        0x01 => Some(KEY_BACK),
+        0x3C => Some(KEY_HOMEPAGE),
+        0x3D => Some(KEY_APPSELECT),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -51,6 +73,15 @@ mod tests {
         assert_eq!(linux_keycode(0x39, false), Some(57)); // SPACE
         assert_eq!(linux_keycode(0x58, false), Some(88)); // F12
         assert_eq!(linux_keycode(0x54, false), None);
+    }
+
+    #[test]
+    fn nav_shortcuts() {
+        assert_eq!(nav_shortcut(0x01, false), Some(KEY_BACK)); // Esc
+        assert_eq!(nav_shortcut(0x3C, false), Some(KEY_HOMEPAGE)); // F2
+        assert_eq!(nav_shortcut(0x3D, false), Some(KEY_APPSELECT)); // F3
+        assert_eq!(nav_shortcut(0x1E, false), None); // A
+        assert_eq!(nav_shortcut(0x47, true), None); // Home (E0) — обычная клавиша
     }
 
     #[test]

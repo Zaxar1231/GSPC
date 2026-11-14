@@ -20,7 +20,8 @@ use windows::Win32::UI::WindowsAndMessaging::{
     PostMessageW, PostQuitMessage, RegisterClassExW, SPI_GETWORKAREA, SW_SHOW,
     SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS, ShowWindow, SystemParametersInfoW, TranslateMessage,
     WM_CLOSE, WM_DESTROY, WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE,
-    WM_SYSKEYDOWN, WM_SYSKEYUP, WNDCLASSEXW, WS_EX_APPWINDOW, WS_OVERLAPPEDWINDOW,
+    WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SYSKEYDOWN, WM_SYSKEYUP, WNDCLASSEXW, WS_EX_APPWINDOW,
+    WS_OVERLAPPEDWINDOW,
 };
 use windows::core::{PCWSTR, w};
 
@@ -45,6 +46,11 @@ pub enum WindowEvent {
         extended: bool,
         /// Нажата.
         pressed: bool,
+    },
+    /// Правая кнопка мыши (в Android — «Назад»).
+    Secondary {
+        /// Кнопка нажата.
+        down: bool,
     },
     /// Пользователь закрывает окно.
     Close,
@@ -150,6 +156,12 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
             let _ = unsafe { ReleaseCapture() };
             let (x, y) = client_point(hwnd, lparam);
             emit(WindowEvent::Pointer { x, y, down: false });
+            LRESULT(0)
+        }
+        WM_RBUTTONDOWN | WM_RBUTTONUP => {
+            emit(WindowEvent::Secondary {
+                down: msg == WM_RBUTTONDOWN,
+            });
             LRESULT(0)
         }
         WM_KEYDOWN | WM_KEYUP | WM_SYSKEYDOWN | WM_SYSKEYUP => {

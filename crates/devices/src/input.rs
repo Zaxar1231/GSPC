@@ -129,6 +129,9 @@ impl std::fmt::Debug for VirtioInput {
     }
 }
 
+/// `KEY_APPSELECT` — «Недавние приложения».
+const KEY_APPSELECT: u16 = 580;
+
 fn set_bit(bits: &mut [u8; 128], n: u16) {
     if let Some(b) = bits.get_mut(usize::from(n / 8)) {
         *b |= 1 << (n % 8);
@@ -230,11 +233,12 @@ impl VirtioInput {
                 (u8::try_from(ev::BTN_TOUCH / 8 + 1).unwrap_or(128), d)
             }
             (InputKind::Keyboard, ev::KEY) => {
-                // KEY_ESC (1) .. KEY_MICMUTE (248).
+                // KEY_ESC (1) .. KEY_MICMUTE (248) и KEY_APPSELECT (580, «Недавние» в Android).
                 for c in 1..=248_u16 {
                     set_bit(&mut d, c);
                 }
-                (32, d)
+                set_bit(&mut d, KEY_APPSELECT);
+                (u8::try_from(KEY_APPSELECT / 8 + 1).unwrap_or(128), d)
             }
             _ => (0, d),
         }
@@ -462,6 +466,8 @@ mod tests {
         let (n, bits) = cfg(&mut d, CFG_EV_BITS, ev::KEY as u8);
         assert!(n > 0);
         assert_ne!(bits[0] & (1 << 1), 0); // KEY_ESC
+        assert_eq!(n, 73);
+        assert_ne!(bits[72] & (1 << 4), 0); // KEY_APPSELECT = 580
         let (n, _) = cfg(&mut d, CFG_EV_BITS, ev::ABS as u8);
         assert_eq!(n, 0);
     }

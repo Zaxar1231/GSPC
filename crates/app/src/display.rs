@@ -14,7 +14,7 @@ use rustdroid_devices::{InputKind, TouchState};
 use rustdroid_gfxstream::{Config as GfxConfig, ffi::flags as gfx_flags};
 use rustdroid_gpu::gfxstream::GfxstreamBackend;
 use rustdroid_gpu::{DisplayMode, FenceSink, Mailbox};
-use rustdroid_input::keys::linux_keycode;
+use rustdroid_input::keys::{KEY_BACK, linux_keycode, nav_shortcut};
 use rustdroid_present::d3d12::PresentMode;
 use rustdroid_present::run::PresentConfig;
 use rustdroid_present::window::{self, WindowEvent};
@@ -171,8 +171,16 @@ pub(crate) fn run(machine: Vm, screen: Screen, vm: &VmArgs) -> Result<(RunOutcom
             extended,
             pressed,
         } => {
-            if let (Some(k), Some(code)) = (&keyboard, linux_keycode(scancode, extended)) {
+            // Esc/F2/F3 — «Назад»/«Домой»/«Недавние»: у образа нет кнопок навигации на экране.
+            let code =
+                nav_shortcut(scancode, extended).or_else(|| linux_keycode(scancode, extended));
+            if let (Some(k), Some(code)) = (&keyboard, code) {
                 k.push(&key_events(code, pressed));
+            }
+        }
+        WindowEvent::Secondary { down } => {
+            if let Some(k) = &keyboard {
+                k.push(&key_events(KEY_BACK, down));
             }
         }
         WindowEvent::Close => close_stopper.stop(),
