@@ -37,6 +37,10 @@
 
 .PARAMETER CheckOnly
     Только проверка системы и 3D (Vulkan, gfxstream) — без образов и запуска Android, ~1 мин.
+
+.PARAMETER KeepInstance
+    Этап 3 без сброса инстанса: повторный запуск Android с сохранёнными данными и кэшами
+    шейдеров (проверка статтеров при повторном запуске). По умолчанию инстанс сбрасывается.
 #>
 [CmdletBinding()]
 param(
@@ -54,6 +58,7 @@ param(
     [switch]$SkipBuild,
     [switch]$FromSource,
     [switch]$CheckOnly,
+    [switch]$KeepInstance,
     [ValidateSet('auto', 'gfxstream', 'software')]
     [string]$Gpu = 'auto',
     [switch]$Yes
@@ -606,7 +611,8 @@ if ($Stages -contains 3 -and $images -and (Test-Path $Exe)) {
         '--gpu', $gpuMode, '--serial-log', $serial, '--logcat', (Join-Path $Out 'stage3-logcat.txt'), '-v')
     # Без этапа 2 инстанс не сбрасывался: после аварийно завершённых прогонов на /metadata
     # оставались пустые файлы флагов aconfig, и system_server падал по кругу.
-    if ($Stages -notcontains 2) { $stage3Args += '--reset' }
+    if ($Stages -notcontains 2 -and -not $KeepInstance) { $stage3Args += '--reset' }
+    if ($KeepInstance) { "stage3 instance: kept" | Add-Content -Path (Join-Path $Out 'system.txt') -Encoding UTF8 }
     # Профиль гостя: после загрузки shell на консоли раз в 10 с печатает top (строки с «TOP »).
     $guestTop = 'while [ "$(getprop sys.boot_completed)" != 1 ]; do sleep 5; done; sleep 15; ' +
         "top -b -d 10 -n 40 -m 12 2>&1 | sed 's/^/TOP /'`n"
