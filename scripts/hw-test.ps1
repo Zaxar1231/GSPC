@@ -39,6 +39,9 @@
 .PARAMETER CheckOnly
     Только проверка системы и 3D (Vulkan, gfxstream) — без образов и запуска Android, ~1 мин.
 
+.PARAMETER Append
+    Дополнительные параметры командной строки ядра гостя (этап 3), например "idle=poll".
+
 .PARAMETER NoUpload
     Не отправлять отчёт на GitHub. По умолчанию, если установлен и авторизован GitHub CLI (gh),
     архив загружается в pre-release hw-reports, а итог — в новое issue.
@@ -65,6 +68,7 @@ param(
     [switch]$CheckOnly,
     [switch]$KeepInstance,
     [switch]$NoUpload,
+    [string]$Append = '',
     [ValidateSet('auto', 'gfxstream', 'gfxstream-gl', 'software')]
     [string]$Gpu = 'auto',
     [switch]$Yes
@@ -621,6 +625,10 @@ if ($Stages -contains 3 -and $images -and (Test-Path $Exe)) {
     # Без этапа 2 инстанс не сбрасывался: после аварийно завершённых прогонов на /metadata
     # оставались пустые файлы флагов aconfig, и system_server падал по кругу.
     if ($Stages -notcontains 2 -and -not $KeepInstance) { $stage3Args += '--reset' }
+    if ($Append) {
+        $stage3Args += @('--append', $Append)
+        "stage3 append: $Append" | Add-Content -Path (Join-Path $Out 'system.txt') -Encoding UTF8
+    }
     if ($KeepInstance) { "stage3 instance: kept" | Add-Content -Path (Join-Path $Out 'system.txt') -Encoding UTF8 }
     # Профиль гостя: после загрузки shell на консоли раз в 10 с печатает top (строки с «TOP »).
     $guestTop = 'while [ "$(getprop sys.boot_completed)" != 1 ]; do sleep 5; done; sleep 15; ' +
