@@ -226,11 +226,14 @@ const GUEST_SETUP_DELAY: Duration = Duration::from_secs(20);
 
 /// Настройка Android в окне (shell на hvc0, после загрузки): экран не гаснет и не блокируется,
 /// пока окно открыто, — у эмулятора нет кнопки питания, а погасший экран выглядит как
-/// остановившееся приложение. Маркер в конце виден в логе консоли.
+/// остановившееся приложение. UWB выключается: HAL UWB Cuttlefish ждёт симулятор на хосте,
+/// которого у нас нет, и на ошибку Android запускает полный bugreport (минуты нагрузки на CPU).
+/// Маркер в конце виден в логе консоли.
 const ANDROID_WINDOW_SETUP: &str = "(while [ \"$(getprop sys.boot_completed)\" != 1 ]; do sleep 2; done; \
 { settings put system screen_off_timeout 2147483647; \
 settings put global stay_on_while_plugged_in 7; \
-svc power stayon true; locksettings set-disabled true; } >/dev/null 2>&1; \
+svc power stayon true; locksettings set-disabled true; \
+cmd uwb disable-uwb; } >/dev/null 2>&1; \
 echo rustdroid: guest setup done) &\n";
 
 /// Отдаёт `script` shell на консоли гостя через [`GUEST_SETUP_DELAY`].
