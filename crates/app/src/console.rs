@@ -220,7 +220,37 @@ fn base_config(vm: &VmArgs, console: ConsoleKind, kernel: PathBuf) -> VmConfig {
     }
 }
 
-fn run_vm(cfg: &VmConfig, mut devices: VmDevices, vm: &VmArgs, console: ConsoleKind) -> Result<()> {
+/// Через сколько после старта ВМ отдавать команды настройки shell на консоли гостя: раньше
+/// запуска shell (сервис `console`) ввод теряется.
+const GUEST_SETUP_DELAY: Duration = Duration::from_secs(20);
+
+/// Настройка Android в окне (shell на hvc0, после загрузки): экран не гаснет и не блокируется,
+/// пока окно открыто, — у эмулятора нет кнопки питания, а погасший экран выглядит как
+/// остановившееся приложение. Маркер в конце виден в логе консоли.
+const ANDROID_WINDOW_SETUP: &str = "(while [ \"$(getprop sys.boot_completed)\" != 1 ]; do sleep 2; done; \
+{ settings put system screen_off_timeout 2147483647; \
+settings put global stay_on_while_plugged_in 7; \
+svc power stayon true; locksettings set-disabled true; } >/dev/null 2>&1; \
+echo rustdroid: guest setup done) &\n";
+
+/// Отдаёт `script` shell на консоли гостя через [`GUEST_SETUP_DELAY`].
+fn spawn_guest_setup(console: ConsoleHandle, script: &'static str) -> std::io::Result<()> {
+    std::thread::Builder::new()
+        .name("guest-setup".into())
+        .spawn(move || {
+            std::thread::sleep(GUEST_SETUP_DELAY);
+            console.push(script.as_bytes());
+        })?;
+    Ok(())
+}
+
+fn run_vm(
+    cfg: &VmConfig,
+    mut devices: VmDevices,
+    vm: &VmArgs,
+    console: ConsoleKind,
+    guest_setup: Option<&'static str>,
+) -> Result<()> {
     let out = open_log(vm.serial_log.as_ref())?;
     if console == ConsoleKind::Hvc {
         devices.console = Some((Box::new(out.clone()), Arc::new(ConsoleInput::default())));
@@ -239,6 +269,9 @@ fn run_vm(cfg: &VmConfig, mut devices: VmDevices, vm: &VmArgs, console: ConsoleK
     tracing::info!(cmdline = machine.cmdline(), "командная строка ядра");
     tracing::info!("Консоль гостя ниже. Выход: Ctrl+A, затем X (или закройте окно).");
 
+    if let (Some(script), Some(h)) = (guest_setup, machine.console()) {
+        spawn_guest_setup(h, script).context("не удалось запустить настройку гостя")?;
+    }
     let target = match (console, machine.console()) {
         (ConsoleKind::Hvc, Some(h)) => InputTarget::Hvc(h),
         _ => InputTarget::Serial(machine.serial()),
@@ -301,7 +334,7 @@ pub(crate) fn boot(args: &BootArgs) -> Result<()> {
             open_disk(&spec)?,
         ));
     }
-    run_vm(&cfg, devices, &args.vm, args.vm.console)
+    run_vm(&cfg, devices, &args.vm, args.vm.console, None)
 }
 
 fn read(path: &Path) -> Result<Vec<u8>> {
@@ -453,7 +486,9 @@ pub(crate) fn boot_android(args: &AndroidArgs) -> Result<()> {
         vsock_cid: Some(GUEST_CID),
         ..VmDevices::default()
     };
-    run_vm(&cfg, devices, &args.vm, ConsoleKind::Hvc)
+    // В окне: экран Android не гаснет (см. ANDROID_WINDOW_SETUP).
+    let setup = args.vm.display.is_some().then_some(ANDROID_WINDOW_SETUP);
+    run_vm(&cfg, devices, &args.vm, ConsoleKind::Hvc, setup)
 }
 
 /// Число консолей virtio у Cuttlefish: hvc0…hvc19.

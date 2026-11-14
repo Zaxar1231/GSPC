@@ -10,7 +10,8 @@
       3. скачивает образы Cuttlefish x86_64 (один раз, дальше берёт из кэша);
       4. этап 3: Android в окне — нужно ваше участие (тап, свайп, клавиатура); когда Android
          загрузится, скрипт подаст звук; скриншоты окна делаются автоматически;
-      5. собирает всё в архив на рабочем столе.
+      5. собирает всё в архив на рабочем столе и, если есть GitHub CLI (gh), отправляет отчёт
+         в issue (архив — в pre-release hw-reports).
 
     С -FromSource — как раньше: ставит Git, Rust и Build Tools, собирает из исходников и может
     прогнать этапы 1–2 (-Stages 1,2,3).
@@ -38,6 +39,10 @@
 .PARAMETER CheckOnly
     Только проверка системы и 3D (Vulkan, gfxstream) — без образов и запуска Android, ~1 мин.
 
+.PARAMETER NoUpload
+    Не отправлять отчёт на GitHub. По умолчанию, если установлен и авторизован GitHub CLI (gh),
+    архив загружается в pre-release hw-reports, а итог — в новое issue.
+
 .PARAMETER KeepInstance
     Этап 3 без сброса инстанса: повторный запуск Android с сохранёнными данными и кэшами
     шейдеров (проверка статтеров при повторном запуске). По умолчанию инстанс сбрасывается.
@@ -59,6 +64,7 @@ param(
     [switch]$FromSource,
     [switch]$CheckOnly,
     [switch]$KeepInstance,
+    [switch]$NoUpload,
     [ValidateSet('auto', 'gfxstream', 'gfxstream-gl', 'software')]
     [string]$Gpu = 'auto',
     [switch]$Yes
@@ -644,6 +650,11 @@ if ($Stages -contains 3 -and $images -and (Test-Path $Exe)) {
     } else {
         Warn 'stage3: нет строк «кадры гостя» — экран мог не появиться'
     }
+    if (Select-String -Path $serial -Pattern 'rustdroid: guest setup done' -SimpleMatch -Quiet -ErrorAction SilentlyContinue) {
+        Ok 'stage3: настройка гостя выполнена (экран не гаснет)'
+    } else {
+        Warn 'stage3: нет отметки настройки гостя — экран Android может гаснуть без касаний'
+    }
     $top = Select-String -Path $serial -Pattern '^TOP ' -Encoding UTF8 -ErrorAction SilentlyContinue
     if ($top) {
         $top | ForEach-Object { $_.Line } | Set-Content (Join-Path $Out 'stage3-guest-top.txt') -Encoding UTF8
@@ -699,4 +710,66 @@ $zip = "$Out.zip"
 Compress-Archive -Path (Join-Path $Out '*') -DestinationPath $zip -Force
 Say ''
 Say "Готово. Архив с результатами: $zip" 'Green'
-Say 'Пришлите его в чат (или приложите к issue на GitHub).' 'Green'
+
+# Отчёт на GitHub: архив — в pre-release hw-reports, итог и ответы — в новое issue.
+function Send-Report([string]$Zip) {
+    # gh пишет прогресс и статус в stderr: при Stop Windows PowerShell считал бы это ошибкой.
+    $ErrorActionPreference = 'Continue'
+    $gh = Get-Command gh -ErrorAction SilentlyContinue
+    if (-not $gh) {
+        Say 'GitHub CLI (gh) не установлен — отчёт не отправлен. Один раз выполните:' 'Yellow'
+        Say '  winget install GitHub.cli   (потом откройте PowerShell заново)' 'Yellow'
+        Say '  gh auth login' 'Yellow'
+        return $false
+    }
+    & gh auth status *> $null
+    if ($LASTEXITCODE -ne 0) {
+        Say 'GitHub CLI не авторизован — отчёт не отправлен. Выполните: gh auth login' 'Yellow'
+        return $false
+    }
+    $repo = "$Owner/$RepoName"
+    $tag = 'hw-reports'
+    & gh release view $tag -R $repo *> $null
+    if ($LASTEXITCODE -ne 0) {
+        & gh release create $tag -R $repo --prerelease --title 'Отчёты hw-test' `
+            --notes 'Архивы hw-test.ps1 с реального железа.' *> $null
+    }
+    Say "  загружаю архив в $repo, релиз $tag..."
+    & gh release upload $tag $Zip -R $repo --clobber | Out-Host
+    if ($LASTEXITCODE -ne 0) { Say 'Не удалось загрузить архив на GitHub.' 'Yellow'; return $false }
+    $name = Split-Path -Leaf $Zip
+    $url = "https://github.com/$repo/releases/download/$tag/$name"
+    $commitLine = Select-String -Path (Join-Path $Out 'system.txt') -Pattern '^commit: (\w{7})' -Encoding UTF8 |
+        Select-Object -First 1
+    $commit = if ($commitLine) { $commitLine.Matches[0].Groups[1].Value } else { '?' }
+    $cpuName = if ($cpu) { $cpu.Name.Trim() } else { 'CPU?' }
+    $body = @('Отчёт `hw-test.ps1`.', '', "Архив: $url", '', '### Итог', '```')
+    $body += Get-Content (Join-Path $Out 'summary.txt') -Encoding UTF8
+    $body += '```'
+    $answers = Join-Path $Out 'stage3-answers.txt'
+    if (Test-Path $answers) {
+        $body += @('', '### Ответы', '```')
+        $body += Get-Content $answers -Encoding UTF8
+        $body += '```'
+    }
+    $frames = Join-Path $Out 'stage3-frames.txt'
+    if (Test-Path $frames) {
+        $body += @('', '### Кадры гостя (последние строки)', '```')
+        $body += Get-Content $frames -Encoding UTF8 | Select-Object -Last 6 |
+            ForEach-Object { ($_ -replace "$([char]27)\[[0-9;]*m", '') -replace '^.*кадры гостя ', '' }
+        $body += '```'
+    }
+    $bodyFile = Join-Path $Work 'issue-body.md'
+    # UTF-8 без BOM: иначе BOM попадёт в начало текста issue.
+    [IO.File]::WriteAllLines($bodyFile, [string[]]$body, (New-Object Text.UTF8Encoding $false))
+    $title = "hw-test: $cpuName, $commit, $Stamp"
+    $issue = (& gh issue create -R $repo --title $title --body-file $bodyFile | Select-Object -Last 1)
+    if ($LASTEXITCODE -ne 0) { Say 'Архив загружен, но issue не создано.' 'Yellow'; return $false }
+    Say "Отчёт отправлен: $issue" 'Green'
+    return $true
+}
+$sent = $false
+if (-not $NoUpload) {
+    try { $sent = Send-Report $zip } catch { Say "Отчёт не отправлен: $_" 'Yellow' }
+}
+if (-not $sent) { Say 'Пришлите архив в чат (или приложите к issue на GitHub).' 'Green' }
