@@ -126,11 +126,12 @@ function Run-Logged([string]$File, [string[]]$Arguments, [string]$Log) {
 }
 
 # Запуск rustdroid без консольного ввода: stdout/stderr в файлы, страховочный таймаут.
-function Run-Vm([string]$Name, [string[]]$Arguments, [int]$Seconds, [scriptblock]$WhileRunning) {
+# $GuestInput уходит в консоль гостя (hvc0, там shell Android).
+function Run-Vm([string]$Name, [string[]]$Arguments, [int]$Seconds, [scriptblock]$WhileRunning, [string]$GuestInput = '') {
     $stdout = Join-Path $Out "$Name-stdout.log"
     $stderr = Join-Path $Out "$Name-stderr.log"
     $stdin = Join-Path $Out '.empty-stdin'
-    Set-Content -Path $stdin -Value '' -NoNewline
+    Set-Content -Path $stdin -Value $GuestInput -NoNewline
     Say "  > rustdroid $($Arguments -join ' ')" 'DarkGray'
     # Start-Process в Windows PowerShell склеивает аргументы без кавычек: пути с пробелами
     # нужно экранировать самим.
@@ -606,7 +607,10 @@ if ($Stages -contains 3 -and $images -and (Test-Path $Exe)) {
     # Без этапа 2 инстанс не сбрасывался: после аварийно завершённых прогонов на /metadata
     # оставались пустые файлы флагов aconfig, и system_server падал по кругу.
     if ($Stages -notcontains 2) { $stage3Args += '--reset' }
-    $rc = Run-Vm 'stage3' $stage3Args $Stage3Seconds $snap
+    # Профиль гостя: после загрузки shell на консоли раз в 10 с печатает top (строки с «TOP »).
+    $guestTop = 'while [ "$(getprop sys.boot_completed)" != 1 ]; do sleep 5; done; sleep 15; ' +
+        "top -b -d 10 -n 40 -m 12 2>&1 | sed 's/^/TOP /'`n"
+    $rc = Run-Vm 'stage3' $stage3Args $Stage3Seconds $snap $guestTop
     Say "  код выхода: $rc"
     "stage3 gpu: $gpuMode" | Add-Content -Path (Join-Path $Out 'system.txt') -Encoding UTF8
     Ok "stage3: графика $gpuMode"
@@ -630,6 +634,13 @@ if ($Stages -contains 3 -and $images -and (Test-Path $Exe)) {
         $frames | ForEach-Object { $_.Line } | Set-Content (Join-Path $Out 'stage3-frames.txt') -Encoding UTF8
     } else {
         Warn 'stage3: нет строк «кадры гостя» — экран мог не появиться'
+    }
+    $top = Select-String -Path $serial -Pattern '^TOP ' -Encoding UTF8 -ErrorAction SilentlyContinue
+    if ($top) {
+        $top | ForEach-Object { $_.Line } | Set-Content (Join-Path $Out 'stage3-guest-top.txt') -Encoding UTF8
+        Ok "stage3: процессы гостя (top) в stage3-guest-top.txt"
+    } else {
+        Warn 'stage3: нет вывода top из консоли гостя'
     }
     # Профиль: загрузка CPU по потокам и время команд virtio-gpu (раз в 10 с).
     $perf = Select-String -Path (Join-Path $Out 'stage3-stderr.log'), (Join-Path $Out 'stage3-stdout.log') `
