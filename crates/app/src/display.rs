@@ -59,11 +59,44 @@ pub(crate) const GFXSTREAM_GUEST_ANGLE: &[(&str, &str)] = &[
     ("androidboot.lcd_density", "240"),
 ];
 
+/// Параметры bootconfig для 3D через gfxstream на OpenGL хоста (уровень 2, видеокарты без
+/// Vulkan; как `gpu_mode=gfxstream` у Cuttlefish): GLES в госте — драйвер gfxstream (`emulation`),
+/// команды GLES идут в virtio-gpu и исполняются на хосте через OpenGL драйвера. GLES 3.0: для
+/// 3.1 хосту нужен OpenGL 4.3, а у Intel HD 2500 — 4.0. Vulkan гостя (`ranchu`) без Vulkan
+/// хоста видеокарт не находит, приложения рисуют через GLES.
+pub(crate) const GFXSTREAM_GUEST_GLES: &[(&str, &str)] = &[
+    ("androidboot.hardware.gralloc", "minigbm"),
+    ("androidboot.hardware.hwcomposer", "ranchu"),
+    ("androidboot.hardware.hwcomposer.mode", "client"),
+    ("androidboot.hardware.hwcomposer.display_finder_mode", "drm"),
+    (
+        "androidboot.hardware.hwcomposer.display_framebuffer_format",
+        "rgba",
+    ),
+    ("androidboot.hardware.egl", "emulation"),
+    ("androidboot.hardware.vulkan", "ranchu"),
+    ("androidboot.hardware.gltransport", "virtio-gpu-asg"),
+    ("androidboot.opengles.version", "196608"),
+    ("androidboot.cpuvulkan.version", "0"),
+    ("androidboot.lcd_density", "240"),
+];
+
 /// Параметры bootconfig гостя для выбранной графики.
 pub(crate) fn guest_bootconfig(gpu: GpuMode) -> &'static [(&'static str, &'static str)] {
     match gpu {
         GpuMode::Software => GUEST_SWIFTSHADER,
         GpuMode::Gfxstream => GFXSTREAM_GUEST_ANGLE,
+        GpuMode::GfxstreamGl => GFXSTREAM_GUEST_GLES,
+    }
+}
+
+/// Флаги рендерера gfxstream для режима 3D (`None` — без gfxstream).
+pub(crate) fn renderer_flags(gpu: GpuMode) -> Option<u32> {
+    match gpu {
+        GpuMode::Software => None,
+        GpuMode::Gfxstream => Some(gfx_flags::USE_VK | gfx_flags::USE_SURFACELESS),
+        // Без USE_EGL: на Windows gfxstream берёт OpenGL драйвера через WGL, а не ANGLE.
+        GpuMode::GfxstreamGl => Some(gfx_flags::USE_GLES | gfx_flags::USE_SURFACELESS),
     }
 }
 
@@ -87,14 +120,14 @@ pub(crate) fn attach(devices: &mut VmDevices, spec: DisplaySpec, gpu: GpuMode) -
         refresh_hz: spec.refresh_hz,
     };
     devices.gpu = Some((mode, Arc::clone(&mailbox)));
-    if gpu == GpuMode::Gfxstream {
+    if let Some(flags) = renderer_flags(gpu) {
         let path = crate::gpu_probe::library_path()
             .context("не удалось определить каталог rustdroid.exe")?;
         let fences = FenceSink::new();
         let backend = GfxstreamBackend::new(
             &path,
             GfxConfig {
-                flags: gfx_flags::USE_VK | gfx_flags::USE_SURFACELESS,
+                flags,
                 width: spec.width,
                 height: spec.height,
             },
@@ -241,5 +274,36 @@ mod tests {
         assert_eq!(to_panel(1.0, 1080), 1079);
         assert_eq!(to_panel(0.5, 1081), 540);
         assert_eq!(to_panel(2.0, 100), 99);
+    }
+
+    fn get(cfg: &[(&str, &str)], key: &str) -> Option<String> {
+        cfg.iter()
+            .find(|(k, _)| *k == key)
+            .map(|(_, v)| (*v).to_owned())
+    }
+
+    #[test]
+    fn gpu_modes_choose_guest_driver_and_host_api() {
+        let gl = guest_bootconfig(GpuMode::GfxstreamGl);
+        assert_eq!(
+            get(gl, "androidboot.hardware.egl").as_deref(),
+            Some("emulation")
+        );
+        assert_eq!(
+            get(gl, "androidboot.opengles.version").as_deref(),
+            Some("196608")
+        );
+        let vk = guest_bootconfig(GpuMode::Gfxstream);
+        assert_eq!(
+            get(vk, "androidboot.hardware.egl").as_deref(),
+            Some("angle")
+        );
+
+        assert_eq!(renderer_flags(GpuMode::Software), None);
+        let gl_flags = renderer_flags(GpuMode::GfxstreamGl).unwrap_or(0);
+        assert_ne!(gl_flags & gfx_flags::USE_GLES, 0);
+        assert_eq!(gl_flags & (gfx_flags::USE_VK | gfx_flags::USE_EGL), 0);
+        let vk_flags = renderer_flags(GpuMode::Gfxstream).unwrap_or(0);
+        assert_ne!(vk_flags & gfx_flags::USE_VK, 0);
     }
 }

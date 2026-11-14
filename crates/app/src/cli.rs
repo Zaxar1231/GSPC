@@ -27,7 +27,11 @@ pub(crate) enum Command {
     BootAndroid(AndroidArgs),
     /// Проверка 3D (Vulkan и gfxstream) в отдельном процессе; её запускает `check`.
     #[command(hide = true)]
-    GpuProbe,
+    GpuProbe {
+        /// Проверить gfxstream на OpenGL драйвера (уровень 2) вместо Vulkan.
+        #[arg(long)]
+        gl: bool,
+    },
 }
 
 /// Графика гостя.
@@ -37,6 +41,9 @@ pub(crate) enum GpuMode {
     Software,
     /// 3D на видеокарте хоста: gfxstream, в госте ANGLE поверх Vulkan.
     Gfxstream,
+    /// 3D для видеокарт без Vulkan: gfxstream на OpenGL драйвера (WGL), в госте драйвер GLES
+    /// gfxstream.
+    GfxstreamGl,
 }
 
 /// Куда направлять ввод с клавиатуры.

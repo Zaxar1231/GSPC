@@ -29,7 +29,7 @@ D3D11 ([ADR 0009](adr/0009-weak-gpu-support.md)).
 | 4.3b | Общая память (shm-область PCI) для `RESOURCE_MAP_BLOB`: host-visible blob-ресурсы, нужные Vulkan гостя | unit-тесты, отображение в WHPX | ✅ (железо — в 4.4) |
 | 4.4 | Параметры гостя для gfxstream (`gpu_mode=gfxstream` у Cuttlefish), выбор уровня графики | загрузочная анимация через GPU | ✅ i3-10110U: Android загружается за 49 с, ввод работает |
 | 4.5 | Zero-copy: Vulkan-образ gfxstream → NT handle → `OpenSharedHandle` в D3D12 | нет копии кадра через CPU | ⏳ |
-| 4.6 | Уровень 2: gfxstream поверх ANGLE-on-D3D11 для GPU без Vulkan | i3-3220 рисует на видеокарте | ⏳ |
+| 4.6 | Уровень 2: gfxstream поверх ANGLE-on-D3D11 для GPU без Vulkan | i3-3220 рисует на видеокарте | 🚧 первый вариант — OpenGL драйвера (WGL), ждёт проверки на железе |
 | 4.7 | Шейдерный проход композитора: letterbox (сохранение пропорций), масштабирование | пропорции при любом размере окна | 🚧 сделано, ждёт проверки на железе |
 | 4.8 | Кэш шейдеров и пайплайнов на диске, VSync от хоста, VRR | нет статтеров при повторном запуске | ⏳ |
 | 4.9 | Замеры: FPS, 1% low, время кадра на ноутбуке и i3-3220 до/после | таблица в этом документе | 🚧 ноутбук — есть, i3-3220 — после 4.6 |
@@ -110,6 +110,23 @@ gfxstream 0003–0006: у драйвера нет synchronization2 и `vkQueueSu
 | i3-10110U, Intel UHD, драйвер 27.20.100.8984 | 1.2.154 | ✅ после патча 0002; capsets vulkan (116 Б), gles, composer | до патча: `VK_ERROR_OUT_OF_POOL_MEMORY` в композиторе → `abort` |
 | i5-8300H | — | — | не проверено |
 | i3-3220, Intel HD 2500 | — | — | не проверено (ожидается: нет Vulkan) |
+
+**4.6, первый вариант: OpenGL драйвера.** gfxstream собран с GLES-рендерером хоста
+(`GFXSTREAM_ENABLE_HOST_GLES`), и на Windows у него два бэкенда: OpenGL драйвера через WGL
+(`opengl32.dll`) и EGL — ANGLE (`libEGL.dll`/`libGLESv2.dll`, флаг `USE_EGL`). Intel HD 2500
+(i3-3220) умеет OpenGL 4.0, поэтому сначала — WGL, без лишних DLL; ANGLE-on-D3D11 — если драйвер
+OpenGL подведёт.
+
+- `--gpu gfxstream-gl`: рендерер `USE_GLES | USE_SURFACELESS` (без `USE_EGL` — значит WGL);
+  гость — как `gpu_mode=gfxstream` у Cuttlefish: `egl=emulation` (драйвер GLES gfxstream),
+  GLES 3.0 (для 3.1 нужен OpenGL 4.3);
+- `rustdroid check`: если gfxstream на Vulkan не запустился, проверяет его на OpenGL в отдельном
+  процессе (`gpu-probe --gl`; gfxstream инициализируется один раз на процесс);
+- `hw-test.ps1 -Gpu auto`: Vulkan → `gfxstream`, иначе OpenGL → `gfxstream-gl`, иначе
+  `software`.
+
+Риск: Vulkan гостя (`ranchu`) без Vulkan хоста видеокарт не находит; если HWUI на образе
+выбирает Vulkan, его нужно отключить параметром гостя (`--set`).
 
 ## Замеры (4.9)
 

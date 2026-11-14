@@ -45,8 +45,27 @@ pub(crate) fn library_path() -> Option<PathBuf> {
 
 // ---------------------------------------------------------------- родитель ---
 
-/// Запускает `rustdroid gpu-probe` и переводит его вывод в пункты проверки.
+/// Пункт проверки, который ставит дочерний процесс, когда gfxstream запустился (по нему
+/// `hw-test.ps1` выбирает режим графики).
+const GFX_OK_VK: &str = "gfxstream: инициализирован на Vulkan";
+/// То же для OpenGL (уровень 2).
+const GFX_OK_GL: &str = "gfxstream GL: инициализирован на OpenGL";
+
+/// Проверка 3D: gfxstream на Vulkan, а если не вышло — на OpenGL драйвера (уровень 2).
+/// Каждая — в своём процессе: gfxstream инициализируется один раз на процесс.
 pub(crate) fn checks(verbose: u8) -> Vec<Check> {
+    let mut v = probe_child(verbose, false);
+    let vk_ok = v
+        .iter()
+        .any(|c| matches!(c, Check::Ok(m) if m.starts_with(GFX_OK_VK)));
+    if !vk_ok {
+        v.extend(probe_child(verbose, true));
+    }
+    v
+}
+
+/// Запускает `rustdroid gpu-probe [--gl]` и переводит его вывод в пункты проверки.
+fn probe_child(verbose: u8, gl: bool) -> Vec<Check> {
     let Ok(exe) = std::env::current_exe() else {
         return vec![warn(
             "не удалось определить путь rustdroid.exe для проверки 3D",
@@ -57,8 +76,11 @@ pub(crate) fn checks(verbose: u8) -> Vec<Check> {
         cmd.arg(format!("-{}", "v".repeat(verbose.into())));
     }
     // stderr (логи драйвера и gfxstream) наследуется и сразу попадает в лог проверки.
+    cmd.arg("gpu-probe");
+    if gl {
+        cmd.arg("--gl");
+    }
     let mut child = match cmd
-        .arg("gpu-probe")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit())
@@ -147,10 +169,14 @@ fn warn(problem: &str) -> Check {
 
 // ---------------------------------------------------------- дочерний процесс ---
 
-/// Тело `rustdroid gpu-probe`. Код выхода: 0 — gfxstream работает, 1 — нет.
-pub(crate) fn run() -> anyhow::Result<()> {
+/// Тело `rustdroid gpu-probe [--gl]`. Код выхода: 0 — gfxstream работает, 1 — нет.
+pub(crate) fn run(gl: bool) -> anyhow::Result<()> {
+    if gl {
+        let ok = gfxstream(true);
+        std::process::exit(if ok { 0 } else { 1 });
+    }
     let vk = vulkan();
-    let gfx = gfxstream();
+    let gfx = gfxstream(false);
     // Выход без деструкторов: teardown gfxstream и выгрузка драйвера не нужны и могут зависнуть.
     // Обычный неуспех (1): причины родитель читает из строк WARN.
     std::process::exit(if vk && gfx { 0 } else { 1 });
@@ -209,8 +235,8 @@ fn vulkan() -> bool {
     }
 }
 
-/// gfxstream: загрузка DLL и инициализация на Vulkan.
-fn gfxstream() -> bool {
+/// gfxstream: загрузка DLL и инициализация на Vulkan или (`gl`) на OpenGL драйвера.
+fn gfxstream(gl: bool) -> bool {
     let Some(path) = library_path() else {
         report(
             false,
@@ -228,12 +254,10 @@ fn gfxstream() -> bool {
         );
         return false;
     }
-    match probe_gfxstream(&path) {
+    match probe_gfxstream(&path, gl) {
         Ok(capsets) => {
-            report(
-                true,
-                &format!("gfxstream: инициализирован на Vulkan, capsets: {capsets}"),
-            );
+            let ok = if gl { GFX_OK_GL } else { GFX_OK_VK };
+            report(true, &format!("{ok}, capsets: {capsets}"));
             true
         }
         Err(rustdroid_gfxstream::Error::LibraryNotFound { reason, .. }) => {
@@ -247,21 +271,28 @@ fn gfxstream() -> bool {
             false
         }
         Err(e) => {
+            let api = if gl { "OpenGL" } else { "Vulkan" };
             report(
                 false,
-                &format!("gfxstream: не запустился ({e}). Подробности — в логе с -v"),
+                &format!("gfxstream: не запустился на {api} ({e}). Подробности — в логе с -v"),
             );
             false
         }
     }
 }
 
-fn probe_gfxstream(path: &Path) -> Result<String, rustdroid_gfxstream::Error> {
-    step("gfxstream: загрузка DLL и инициализация на Vulkan");
+fn probe_gfxstream(path: &Path, gl: bool) -> Result<String, rustdroid_gfxstream::Error> {
+    let flags = if gl {
+        step("gfxstream: загрузка DLL и инициализация на OpenGL (WGL)");
+        crate::display::renderer_flags(crate::cli::GpuMode::GfxstreamGl).unwrap_or(0)
+    } else {
+        step("gfxstream: загрузка DLL и инициализация на Vulkan");
+        ffi::flags::USE_VK
+    };
     let backend = GfxstreamBackend::new(
         path,
         Config {
-            flags: ffi::flags::USE_VK,
+            flags,
             width: 1280,
             height: 720,
         },

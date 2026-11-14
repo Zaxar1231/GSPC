@@ -70,7 +70,7 @@ fn init_tracing(verbose: u8) {
 fn run(command: Command, verbose: u8) -> Result<()> {
     match command {
         Command::Check => preflight::run(verbose),
-        Command::GpuProbe => gpu_probe::run(),
+        Command::GpuProbe { gl } => gpu_probe::run(gl),
         Command::Boot(args) => console::boot(&args),
         Command::BootAndroid(args) => console::boot_android(&args),
     }

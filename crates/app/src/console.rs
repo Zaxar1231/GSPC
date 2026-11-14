@@ -369,8 +369,8 @@ pub(crate) fn boot_android(args: &AndroidArgs) -> Result<()> {
     let mut bootconfig =
         rustdroid_bootconfig(&vendor_img.bootconfig, "pci0000:00/0000:00:01.0", "hvc0");
     if let Some(spec) = args.vm.display.as_deref() {
-        // Графика гостя: программный рендер (SwiftShader/ANGLE) или gfxstream (ANGLE поверх
-        // Vulkan хоста); композитор — через DRM virtio-gpu.
+        // Графика гостя: программный рендер (SwiftShader/ANGLE), gfxstream (ANGLE поверх
+        // Vulkan хоста) или gfxstream на OpenGL хоста; композитор — через DRM virtio-gpu.
         for (k, v) in display::guest_bootconfig(args.vm.gpu) {
             bootconfig.set(k, v);
         }

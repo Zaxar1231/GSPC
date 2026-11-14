@@ -10,6 +10,9 @@
 
 ### Added
 
+- Уровень графики 2 для видеокарт без Vulkan (этап 4.6, первый вариант): `--gpu gfxstream-gl` —
+  gfxstream на OpenGL драйвера (WGL), в госте драйвер GLES gfxstream. `rustdroid check` проверяет
+  OpenGL, если Vulkan не запустился; `hw-test.ps1 -Gpu auto` выбирает его сам.
 - `hw-test.ps1 -KeepInstance`: этап 3 без сброса инстанса — проверка повторного запуска с
   сохранёнными данными и кэшами шейдеров.
 - Таблица замеров этапа 4.9 в `docs/stage-4.md` (i3-10110U до и после правки vCPU).

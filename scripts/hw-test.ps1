@@ -32,8 +32,8 @@
     Число vCPU гостя; 0 (по умолчанию) — rustdroid подберёт сам, оставив часть ядер хосту.
 
 .PARAMETER Gpu
-    Графика этапа 3: auto (по умолчанию: gfxstream, если проверка 3D прошла, иначе software),
-    gfxstream или software.
+    Графика этапа 3: auto (по умолчанию: gfxstream на Vulkan, если он прошёл проверку 3D, иначе
+    gfxstream-gl на OpenGL драйвера, иначе software), gfxstream, gfxstream-gl или software.
 
 .PARAMETER CheckOnly
     Только проверка системы и 3D (Vulkan, gfxstream) — без образов и запуска Android, ~1 мин.
@@ -59,7 +59,7 @@ param(
     [switch]$FromSource,
     [switch]$CheckOnly,
     [switch]$KeepInstance,
-    [ValidateSet('auto', 'gfxstream', 'software')]
+    [ValidateSet('auto', 'gfxstream', 'gfxstream-gl', 'software')]
     [string]$Gpu = 'auto',
     [switch]$Yes
 )
@@ -75,6 +75,7 @@ try {
 $RepoUrl = 'https://github.com/Zaxar1231/GSPC.git'
 if ($CheckOnly) { $Stages = @() }
 $script:GfxstreamOk = $false
+$script:GfxstreamGlOk = $false
 $Stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
 $Desktop = [Environment]::GetFolderPath('Desktop')
 if (-not $Desktop) { $Desktop = $HOME }
@@ -443,6 +444,7 @@ if (Test-Path $Exe) {
     if ($rc -eq 0) { Ok 'rustdroid check: система готова' } else { Fail "rustdroid check: код $rc (check.log)" }
     # Итог по 3D — отдельными строками в summary.txt.
     $script:GfxstreamOk = [bool](Select-String -Path $checkLog -Pattern 'gfxstream: инициализирован' -SimpleMatch -Quiet)
+    $script:GfxstreamGlOk = [bool](Select-String -Path $checkLog -Pattern 'gfxstream GL: инициализирован' -SimpleMatch -Quiet)
     foreach ($m in Select-String -Path $checkLog -Pattern '\[( OK |WARN)\] (.*)$') {
         $text = $m.Matches[0].Groups[2].Value -replace "$([char]27)\[[0-9;]*m", ''
         if ($text -notmatch '^(Vulkan|gfxstream|проверка 3D)') { continue }
@@ -565,7 +567,7 @@ if ($Stages -contains 2 -and $images -and (Test-Path $Exe)) {
 if ($Stages -contains 3 -and $images -and (Test-Path $Exe)) {
     $gpuMode = $Gpu
     if ($gpuMode -eq 'auto') {
-        $gpuMode = if ($script:GfxstreamOk) { 'gfxstream' } else { 'software' }
+        $gpuMode = if ($script:GfxstreamOk) { 'gfxstream' } elseif ($script:GfxstreamGlOk) { 'gfxstream-gl' } else { 'software' }
     }
     Step "Этап 3: Android в окне ($Display, графика $gpuMode, до $Stage3Seconds с)"
     Say '  Сейчас откроется окно RustDroid. Первая загрузка с программным рендером занимает' 'Yellow'
