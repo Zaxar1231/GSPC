@@ -321,6 +321,11 @@ impl FenceSink {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .push(fence);
+        self.wake();
+    }
+
+    /// Будит обработку очереди управления без нового фенса (например, по таймеру).
+    pub fn wake(&self) {
         if let Some(w) = self
             .waker
             .lock()

@@ -177,6 +177,9 @@ struct ThreeD {
     pending: Vec<PendingFence>,
     shm: Option<Shm>,
     watch: Arc<CommandWatch>,
+    /// Перечитывание последнего кадра после затишья (см. [`crate::refresh`]).
+    refresh: crate::refresh::Plan,
+    refresh_timer: Option<crate::refresh::Timer>,
 }
 
 impl ThreeD {
@@ -353,9 +356,12 @@ impl VirtioGpu {
         fences: Arc<FenceSink>,
     ) -> Self {
         let mut gpu = Self::new(mode, mailbox);
+        let refresh_timer = crate::refresh::Timer::spawn(Arc::clone(&fences));
         gpu.three_d = Some(ThreeD {
             backend,
             fences,
+            refresh: crate::refresh::Plan::default(),
+            refresh_timer,
             contexts: HashSet::new(),
             resources: HashMap::new(),
             pending: Vec::new(),
@@ -839,12 +845,34 @@ impl VirtioGpu {
                 let id = u32_at(req, b + 16);
                 if *scanout_resource == Some(id) {
                     publish_3d(t, mailbox, id);
+                    let delay = t.refresh.frame(id, Instant::now());
+                    if let Some(timer) = &t.refresh_timer {
+                        timer.arm(delay);
+                    }
                 }
                 RESP_OK_NODATA
             }
             _ => return None,
         };
         Some(status)
+    }
+
+    /// Перечитывает последний кадр, если подошёл срок (см. [`crate::refresh`]).
+    fn refresh_frame(&mut self) {
+        let Some(t) = self.three_d.as_mut() else {
+            return;
+        };
+        let Some((id, next)) = t.refresh.take_due(Instant::now()) else {
+            return;
+        };
+        if self.scanout_resource != Some(id) {
+            t.refresh.clear();
+            return;
+        }
+        publish_3d(t, &self.mailbox, id);
+        if let (Some(d), Some(timer)) = (next, &t.refresh_timer) {
+            timer.arm(d);
+        }
     }
 
     /// Придерживает команду с фенсом до его выполнения (только 3D). `true` — придержана.
@@ -1067,6 +1095,7 @@ impl VirtioDevice for VirtioGpu {
                 t.backend.context_destroy(ctx);
             }
             t.pending.clear();
+            t.refresh.clear();
             let _ = t.fences.take();
         }
     }
@@ -1122,6 +1151,7 @@ impl VirtioDevice for VirtioGpu {
         if index == CONTROL_QUEUE {
             // Фенсы, которые бэкенд выполнил сразу (в том числе внутри create_fence).
             any |= self.complete_fences(queue, mem)?;
+            self.refresh_frame();
         }
         Ok(any)
     }

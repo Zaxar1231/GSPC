@@ -14,6 +14,7 @@ pub mod device;
 pub mod edid;
 #[cfg(windows)]
 pub mod gfxstream;
+mod refresh;
 pub mod scanout;
 mod watch;
 
