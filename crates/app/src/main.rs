@@ -19,6 +19,8 @@ mod display;
 #[cfg(windows)]
 mod gpu_probe;
 #[cfg(windows)]
+mod hostnet;
+#[cfg(windows)]
 mod preflight;
 #[cfg_attr(not(windows), allow(dead_code))]
 mod pulse;

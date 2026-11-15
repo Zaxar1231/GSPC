@@ -471,6 +471,7 @@ dependencies = [
  "rustdroid-gpu",
  "rustdroid-input",
  "rustdroid-instance",
+ "rustdroid-net",
  "rustdroid-present",
  "rustdroid-vmm",
  "rustdroid-whpx",
@@ -488,6 +489,7 @@ name = "rustdroid-devices"
 version = "0.0.1"
 dependencies = [
  "crc32fast",
+ "rustdroid-net",
  "rustdroid-virtio",
  "tracing",
  "vm-superio",

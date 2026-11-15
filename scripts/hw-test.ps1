@@ -46,6 +46,10 @@
     Не отправлять отчёт на GitHub. По умолчанию, если установлен и авторизован GitHub CLI (gh),
     архив загружается в pre-release hw-reports, а итог — в новое issue.
 
+.PARAMETER NoNet
+    Этап 3 без сетевой карты (по умолчанию у гостя virtio-net с NAT в пользовательском режиме,
+    --net user). В отчёт попадает диагностика сети гостя (stage3-net.txt).
+
 .PARAMETER KeepInstance
     Этап 3 без сброса инстанса: повторный запуск Android с сохранёнными данными и кэшами
     шейдеров (проверка статтеров при повторном запуске). По умолчанию инстанс сбрасывается.
@@ -68,6 +72,7 @@ param(
     [switch]$CheckOnly,
     [switch]$KeepInstance,
     [switch]$NoUpload,
+    [switch]$NoNet,
     [string]$Append = '',
     [ValidateSet('auto', 'gfxstream', 'gfxstream-gl', 'software')]
     [string]$Gpu = 'auto',
@@ -653,6 +658,7 @@ if ($Stages -contains 3 -and $images -and (Test-Path $Exe)) {
         $stage3Args += @('--append', $Append)
         "stage3 append: $Append" | Add-Content -Path (Join-Path $Out 'system.txt') -Encoding UTF8
     }
+    if (-not $NoNet) { $stage3Args += @('--net', 'user') }
     if ($KeepInstance) { "stage3 instance: kept" | Add-Content -Path (Join-Path $Out 'system.txt') -Encoding UTF8 }
     # Профиль гостя: после загрузки shell на консоли раз в 10 с печатает top (строки с «TOP »).
     $guestTop = 'while [ "$(getprop sys.boot_completed)" != 1 ]; do sleep 5; done; sleep 15; ' +
@@ -693,6 +699,21 @@ if ($Stages -contains 3 -and $images -and (Test-Path $Exe)) {
         Ok "stage3: процессы гостя (top) в stage3-guest-top.txt"
     } else {
         Warn 'stage3: нет вывода top из консоли гостя'
+    }
+    # Сеть гостя: DHCP на стороне хоста и диагностика из консоли гостя (NETDIAG).
+    if (-not $NoNet) {
+        $dhcp = Select-String -Path (Join-Path $Out 'stage3-stderr.log'), (Join-Path $Out 'stage3-stdout.log') `
+            -Pattern 'DHCP: гостю выдан адрес' -SimpleMatch -Encoding UTF8 -ErrorAction SilentlyContinue
+        if ($dhcp) { Ok 'stage3: гость получил адрес по DHCP (сеть virtio-net работает)' }
+        else { Warn 'stage3: гость не запрашивал DHCP — Android не использует сетевую карту' }
+        $netdiag = Select-String -Path $serial -Pattern 'NETDIAG ' -SimpleMatch -Encoding UTF8 -ErrorAction SilentlyContinue
+        if ($netdiag) {
+            $netdiag | ForEach-Object { $_.Line -replace '^.*?NETDIAG ', '' } |
+                Set-Content (Join-Path $Out 'stage3-net.txt') -Encoding UTF8
+            Ok 'stage3: диагностика сети гостя в stage3-net.txt'
+        } else {
+            Warn 'stage3: нет диагностики сети из консоли гостя'
+        }
     }
     # Профиль: загрузка CPU по потокам и время команд virtio-gpu (раз в 10 с).
     $perf = Select-String -Path (Join-Path $Out 'stage3-stderr.log'), (Join-Path $Out 'stage3-stdout.log') `

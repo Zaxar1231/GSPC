@@ -3,6 +3,8 @@
 use crate::mem::GuestMemory;
 use crate::queue::{Queue, QueueError};
 
+/// Тип устройства virtio-net.
+pub const TYPE_NET: u32 = 1;
 /// Тип устройства virtio-blk.
 pub const TYPE_BLOCK: u32 = 2;
 /// Тип устройства virtio-console.

@@ -46,6 +46,16 @@ pub(crate) enum GpuMode {
     GfxstreamGl,
 }
 
+/// Сеть гостя.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub(crate) enum NetMode {
+    /// Сетевой карты нет.
+    None,
+    /// virtio-net с NAT в пользовательском режиме: гость `10.0.2.15`, шлюз и хост `10.0.2.2`,
+    /// DNS `10.0.2.3`; без драйверов и прав администратора.
+    User,
+}
+
 /// Куда направлять ввод с клавиатуры.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub(crate) enum ConsoleKind {
@@ -109,6 +119,11 @@ pub(crate) struct VmArgs {
     /// — 3D на видеокарте хоста через gfxstream (нужна gfxstream_backend.dll и Vulkan).
     #[arg(long, value_enum, default_value_t = GpuMode::Software)]
     pub gpu: GpuMode,
+
+    /// Сеть гостя: `user` — virtio-net с NAT в пользовательском режиме (интернет через сеть
+    /// хоста без драйверов и прав администратора), `none` — без сети.
+    #[arg(long, value_enum, default_value_t = NetMode::None)]
+    pub net: NetMode,
 
     /// Выводить без VSync (tearing; для VRR/G-Sync/FreeSync).
     #[arg(long)]

@@ -66,6 +66,22 @@ impl Default for NatConfig {
     }
 }
 
+/// Выбирает DNS-сервер хоста из списка адресов-строк: первый годный IPv4 (не локальный, не
+/// нулевой, не link-local, не multicast).
+#[must_use]
+pub fn pick_dns<'a>(candidates: impl IntoIterator<Item = &'a str>) -> Option<Ipv4Addr> {
+    candidates
+        .into_iter()
+        .filter_map(|c| c.trim().parse::<Ipv4Addr>().ok())
+        .find(|ip| {
+            !(ip.is_loopback()
+                || ip.is_unspecified()
+                || ip.is_link_local()
+                || ip.is_multicast()
+                || ip.is_broadcast())
+        })
+}
+
 /// Очередь кадров к гостю с адресами Ethernet.
 pub(crate) struct Tx<'a> {
     out: &'a mut VecDeque<Vec<u8>>,
@@ -274,6 +290,11 @@ impl Nat {
             netmask: self.cfg.netmask,
             dns: self.cfg.dns_ip,
         };
+        tracing::info!(
+            kind = if kind == dhcp::OFFER { "OFFER" } else { "ACK" },
+            guest = %self.cfg.guest_ip,
+            "DHCP: гостю выдан адрес"
+        );
         let body = dhcp::reply(&req, kind, &lease);
         let udp = wire::build_udp(self.cfg.gateway_ip, Ipv4Addr::BROADCAST, 67, 68, &body);
         let ip = wire::build_ipv4(self.cfg.gateway_ip, Ipv4Addr::BROADCAST, PROTO_UDP, &udp);
@@ -347,3 +368,26 @@ impl Nat {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod dns_tests {
+    use super::*;
+
+    #[test]
+    fn picks_first_usable_ipv4() {
+        assert_eq!(
+            pick_dns([
+                "",
+                "127.0.0.1",
+                "0.0.0.0",
+                "169.254.1.1",
+                "fe80::1",
+                "192.168.1.1",
+                "8.8.8.8"
+            ]),
+            Some(Ipv4Addr::new(192, 168, 1, 1))
+        );
+        assert_eq!(pick_dns(["junk", "::1"]), None);
+        assert_eq!(pick_dns([" 1.1.1.1 "]), Some(Ipv4Addr::new(1, 1, 1, 1)));
+    }
+}

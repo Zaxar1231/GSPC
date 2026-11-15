@@ -7,8 +7,8 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use rustdroid_devices::{
-    CmosRtc, ConsoleInput, Disk, InputEvent, InputEvents, InputKind, Serial16550, VirtioBlk,
-    VirtioConsole, VirtioInput, VirtioVsock,
+    CmosRtc, ConsoleInput, Disk, InputEvent, InputEvents, InputKind, NetBackend, NetWake,
+    Serial16550, VirtioBlk, VirtioConsole, VirtioInput, VirtioNet, VirtioVsock,
 };
 use rustdroid_gpu::backend::ShmMapper;
 use rustdroid_gpu::{Backend3d, DisplayMode, FenceSink, Mailbox, VirtioGpu};
@@ -91,6 +91,8 @@ pub struct VmDevices {
     pub gpu_3d: Option<(Box<dyn Backend3d>, Arc<FenceSink>)>,
     /// virtio-input: вид устройства, имя и очередь событий.
     pub inputs: Vec<(InputKind, String, Arc<InputEvents>)>,
+    /// virtio-net: сетевой бэкенд и его будильник очереди приёма. Без него сетевой карты нет.
+    pub net: Option<(Box<dyn NetBackend>, Arc<NetWake>)>,
 }
 
 impl std::fmt::Debug for VmDevices {
@@ -109,6 +111,7 @@ impl std::fmt::Debug for VmDevices {
             .field("vsock_cid", &self.vsock_cid)
             .field("gpu", &self.gpu.as_ref().map(|(m, _)| *m))
             .field("inputs", &self.inputs.len())
+            .field("net", &self.net.is_some())
             .finish()
     }
 }
@@ -552,6 +555,15 @@ impl Vm {
         if let Some(cid) = devices.vsock_cid {
             add("vsock".into(), Box::new(VirtioVsock::new(cid)))?;
         }
+        let mut net_wake = None;
+        if let Some((backend, wake)) = devices.net {
+            add(
+                "net".into(),
+                Box::new(VirtioNet::new(backend, rustdroid_devices::net::DEFAULT_MAC)),
+            )?;
+            net_wake = Some(wake);
+            tracing::info!("virtio-net (NAT в пользовательском режиме)");
+        }
         let pci = Arc::new(pci);
 
         // Ядро, ACPI, таблицы.
@@ -601,6 +613,12 @@ impl Vm {
             {
                 // Фенсы gfxstream будят обработку очереди управления virtio-gpu.
                 fences.set_waker(w.kicker(rustdroid_gpu::device::CONTROL_QUEUE));
+            }
+            if name == "net"
+                && let Some(wake) = &net_wake
+            {
+                // Кадры от NAT будят очередь приёма.
+                wake.set_waker(w.kicker(rustdroid_devices::net::RX_QUEUE));
             }
             workers.push(w);
         }

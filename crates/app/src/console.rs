@@ -24,7 +24,7 @@ use windows::Win32::System::Console::{
     GetStdHandle, STD_INPUT_HANDLE, STD_OUTPUT_HANDLE, SetConsoleMode,
 };
 
-use crate::cli::{AndroidArgs, BootArgs, ConsoleKind, DiskSpec, DisplaySpec, VmArgs};
+use crate::cli::{AndroidArgs, BootArgs, ConsoleKind, DiskSpec, DisplaySpec, NetMode, VmArgs};
 use crate::{display, pulse};
 
 /// Префикс управляющих комбинаций (как в QEMU): Ctrl+A.
@@ -303,8 +303,17 @@ echo rustdroid: guest setup done; n=0; while :; do sleep 5; n=$((n+1)); \
 echo \"rustdroid: hb $n\"; if [ $((n % 4)) = 0 ]; then \
 (s=$(screencap 2>/dev/null | md5sum | cut -c1-12); echo \"rustdroid: sc $n $s\") & fi; done) </dev/null &\n";
 
+/// Диагностика сети гостя при `--net user`: через 30 с после загрузки пишет в консоль строки
+/// `NETDIAG …` — адреса и маршруты, свойства сети, правила `eth0` в init Cuttlefish и пробное
+/// соединение с `1.1.1.1:80` в обход DNS (проверка маршрута и NAT).
+const NET_DIAG: &str = "(sleep 30; { echo '--- ip addr'; ip -o addr; echo '--- ip route'; ip route; \
+echo '--- props'; getprop | grep -E 'eth|dns|netd|net\\.'; echo '--- init rc'; \
+grep -n -B1 -A6 eth0 /vendor/etc/init/init.cutf_cvm.rc; echo '--- connect 1.1.1.1:80'; \
+printf 'GET / HTTP/1.0\\r\\n\\r\\n' | timeout 10 toybox nc -w 5 1.1.1.1 80 | head -3; \
+echo '--- end'; } </dev/null 2>&1 | sed 's/^/NETDIAG /') &\n";
+
 /// Отдаёт `script` shell на консоли гостя через [`GUEST_SETUP_DELAY`].
-fn spawn_guest_setup(console: ConsoleHandle, script: &'static str) -> std::io::Result<()> {
+fn spawn_guest_setup(console: ConsoleHandle, script: String) -> std::io::Result<()> {
     std::thread::Builder::new()
         .name("guest-setup".into())
         .spawn(move || {
@@ -319,11 +328,14 @@ fn run_vm(
     mut devices: VmDevices,
     vm: &VmArgs,
     console: ConsoleKind,
-    guest_setup: Option<&'static str>,
+    guest_setup: Option<String>,
 ) -> Result<()> {
     let out = open_log(vm.serial_log.as_ref())?;
     if console == ConsoleKind::Hvc {
         devices.console = Some((Box::new(out.clone()), Arc::new(ConsoleInput::default())));
+    }
+    if vm.net == NetMode::User {
+        devices.net = Some(crate::hostnet::user_net()?);
     }
     let display = vm
         .display
@@ -557,7 +569,13 @@ pub(crate) fn boot_android(args: &AndroidArgs) -> Result<()> {
         ..VmDevices::default()
     };
     // В окне: экран Android не гаснет (см. ANDROID_WINDOW_SETUP).
-    let setup = args.vm.display.is_some().then_some(ANDROID_WINDOW_SETUP);
+    let setup = args.vm.display.is_some().then(|| {
+        let mut script = ANDROID_WINDOW_SETUP.to_owned();
+        if args.vm.net == NetMode::User {
+            script.push_str(NET_DIAG);
+        }
+        script
+    });
     run_vm(&cfg, devices, &args.vm, ConsoleKind::Hvc, setup)
 }
 
