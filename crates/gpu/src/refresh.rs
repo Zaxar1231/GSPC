@@ -51,6 +51,62 @@ impl Plan {
     }
 }
 
+/// Меняется ли содержимое кадров, которые уходят в окно: число кадров, сколько из них отличались
+/// от предыдущего, и хэш последнего — раз в [`CONTENT_LOG`]. Сравнивается с хэшем `screencap`
+/// гостя: если гость видит изменения, а кадры одинаковые — устаревшие кадры читаем мы.
+#[derive(Debug)]
+pub(crate) struct Content {
+    last: u64,
+    frames: u32,
+    changed: u32,
+    since: Instant,
+}
+
+/// Как часто писать сводку [`Content`].
+pub(crate) const CONTENT_LOG: Duration = Duration::from_secs(10);
+
+impl Content {
+    pub(crate) fn new(now: Instant) -> Self {
+        Self {
+            last: 0,
+            frames: 0,
+            changed: 0,
+            since: now,
+        }
+    }
+
+    /// Учитывает кадр; раз в [`CONTENT_LOG`] возвращает сводку `(кадров, изменённых, хэш)`.
+    pub(crate) fn frame(&mut self, data: &[u8], now: Instant) -> Option<(u32, u32, u64)> {
+        let h = hash(data);
+        self.frames += 1;
+        if h != self.last {
+            self.changed += 1;
+            self.last = h;
+        }
+        if now.duration_since(self.since) < CONTENT_LOG {
+            return None;
+        }
+        let out = (self.frames, self.changed, self.last);
+        self.frames = 0;
+        self.changed = 0;
+        self.since = now;
+        Some(out)
+    }
+}
+
+/// Быстрый хэш кадра: каждое 4-е 8-байтовое слово (кадр 1280×720 — ~115 тыс. умножений).
+#[must_use]
+pub(crate) fn hash(data: &[u8]) -> u64 {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for chunk in data.as_chunks::<32>().0 {
+        let w: [u8; 8] = [
+            chunk[0], chunk[1], chunk[2], chunk[3], chunk[4], chunk[5], chunk[6], chunk[7],
+        ];
+        h = (h ^ u64::from_le_bytes(w)).wrapping_mul(0x0100_0000_01b3);
+    }
+    h ^ data.len() as u64
+}
+
 /// Поток-таймер: будит устройство через заданную задержку; новая задержка заменяет старую.
 #[derive(Debug)]
 pub(crate) struct Timer {
@@ -114,6 +170,25 @@ mod tests {
         p.frame(3, t1);
         p.clear();
         assert_eq!(p.take_due(t1 + Duration::from_secs(1)), None);
+    }
+
+    #[test]
+    fn content_changes() {
+        let t0 = Instant::now();
+        let mut c = Content::new(t0);
+        let a = vec![1u8; 4096];
+        let mut b = a.clone();
+        b[64] = 2;
+        assert_ne!(hash(&a), hash(&b));
+        assert_eq!(c.frame(&a, t0), None);
+        assert_eq!(c.frame(&a, t0), None);
+        assert_eq!(c.frame(&b, t0), None);
+        let s = c.frame(&b, t0 + CONTENT_LOG).map(|(f, ch, _)| (f, ch));
+        assert_eq!(s, Some((4, 2)));
+        assert_eq!(
+            c.frame(&b, t0 + CONTENT_LOG * 2).map(|(f, ch, _)| (f, ch)),
+            Some((1, 0))
+        );
     }
 
     #[test]

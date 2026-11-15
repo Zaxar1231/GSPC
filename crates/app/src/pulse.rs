@@ -11,42 +11,81 @@ pub(crate) const PERIOD_SECS: f64 = 5.0;
 /// С какого опоздания отметка считается задержкой, с.
 pub(crate) const LATE_SECS: f64 = 1.0;
 
-const MARKER: &[u8] = b"rustdroid: hb ";
+/// Отметка пульса.
+pub(crate) const HB: &[u8] = b"rustdroid: hb ";
+
+/// Снимок экрана гостя: `rustdroid: sc N HASH` — начало md5 вывода `screencap` (что сам гость
+/// считает своим экраном). Сравнивается с тем, меняются ли кадры, которые показывает окно.
+pub(crate) const SC: &[u8] = b"rustdroid: sc ";
 
 /// Сколько хвоста держать между кусками вывода: маркер и число могут прийти в разных `write`.
-const TAIL: usize = 32;
+const TAIL: usize = 64;
 
-/// Находит номера отметок `rustdroid: hb N` в потоке байт консоли.
-#[derive(Debug, Default)]
+/// Распознанная отметка: номер и необязательное шестнадцатеричное значение после пробела.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Mark {
+    /// Номер.
+    pub(crate) seq: u64,
+    /// Значение (`HASH`), если есть.
+    pub(crate) value: Option<String>,
+}
+
+/// Находит отметки `MARKER N[ HEX]` в потоке байт консоли.
+#[derive(Debug)]
 pub(crate) struct Scanner {
+    marker: &'static [u8],
     buf: Vec<u8>,
 }
 
 impl Scanner {
-    /// Добавляет кусок вывода, возвращает номера полностью пришедших отметок.
-    pub(crate) fn feed(&mut self, bytes: &[u8]) -> Vec<u64> {
+    /// Сканер отметок с префиксом `marker`.
+    pub(crate) fn new(marker: &'static [u8]) -> Self {
+        Self {
+            marker,
+            buf: Vec::new(),
+        }
+    }
+
+    /// Добавляет кусок вывода, возвращает полностью пришедшие отметки.
+    pub(crate) fn feed(&mut self, bytes: &[u8]) -> Vec<Mark> {
         self.buf.extend_from_slice(bytes);
         let mut found = Vec::new();
         let mut consumed = 0;
         let mut from = 0;
-        while let Some(pos) = find(self.buf.get(from..).unwrap_or(&[]), MARKER) {
-            let start = from + pos + MARKER.len();
+        while let Some(pos) = find(self.buf.get(from..).unwrap_or(&[]), self.marker) {
+            let start = from + pos + self.marker.len();
             let rest = self.buf.get(start..).unwrap_or(&[]);
             let digits = rest.iter().take_while(|b| b.is_ascii_digit()).count();
-            if digits == rest.len() {
-                // Число ещё не закончилось — ждём следующий кусок.
+            let after = rest.get(digits..).unwrap_or(&[]);
+            let hex = if after.first() == Some(&b' ') {
+                after
+                    .iter()
+                    .skip(1)
+                    .take_while(|b| b.is_ascii_hexdigit())
+                    .count()
+            } else {
+                0
+            };
+            let used = if hex > 0 { digits + 1 + hex } else { digits };
+            if used == rest.len() || after == b" " {
+                // Отметка ещё не закончилась — ждём следующий кусок.
                 consumed = from + pos;
                 break;
             }
             if digits > 0 {
-                let n = std::str::from_utf8(rest.get(..digits).unwrap_or(&[]))
+                let seq = std::str::from_utf8(rest.get(..digits).unwrap_or(&[]))
                     .ok()
                     .and_then(|s| s.parse().ok());
-                if let Some(n) = n {
-                    found.push(n);
+                let value = (hex > 0)
+                    .then(|| rest.get(digits + 1..digits + 1 + hex))
+                    .flatten()
+                    .and_then(|v| std::str::from_utf8(v).ok())
+                    .map(str::to_owned);
+                if let Some(seq) = seq {
+                    found.push(Mark { seq, value });
                 }
             }
-            from = start + digits;
+            from = start + used;
             consumed = from;
         }
         if consumed == 0 && found.is_empty() {
@@ -113,20 +152,50 @@ impl Tracker {
 mod tests {
     use super::*;
 
+    fn seqs(marks: Vec<Mark>) -> Vec<u64> {
+        marks.into_iter().map(|m| m.seq).collect()
+    }
+
     #[test]
     fn finds_markers_across_chunks() {
-        let mut s = Scanner::default();
-        assert_eq!(s.feed(b"junk rustdroid: hb 1\nmore"), vec![1]);
-        assert_eq!(s.feed(b"[ 1.0] x rustdroid: h"), Vec::<u64>::new());
-        assert_eq!(s.feed(b"b 2"), Vec::<u64>::new());
-        assert_eq!(s.feed(b"3\r\nrustdroid: hb 24\n"), vec![23, 24]);
+        let mut s = Scanner::new(HB);
+        assert_eq!(seqs(s.feed(b"junk rustdroid: hb 1\nmore")), vec![1]);
+        assert!(s.feed(b"[ 1.0] x rustdroid: h").is_empty());
+        assert!(s.feed(b"b 2").is_empty());
+        assert_eq!(seqs(s.feed(b"3\r\nrustdroid: hb 24\n")), vec![23, 24]);
         // Испорченная отметка без числа пропускается.
-        assert_eq!(s.feed(b"rustdroid: hb x rustdroid: hb 25 "), vec![25]);
+        assert_eq!(
+            seqs(s.feed(b"rustdroid: hb x rustdroid: hb 25 \n")),
+            vec![25]
+        );
+    }
+
+    #[test]
+    fn snapshot_hash() {
+        let mut s = Scanner::new(SC);
+        assert!(s.feed(b"rustdroid: sc 4 a1b2").is_empty());
+        assert!(s.feed(b"c3").is_empty());
+        let m = s.feed(b"\r\nrustdroid: sc 8 \n");
+        assert_eq!(
+            m,
+            vec![
+                Mark {
+                    seq: 4,
+                    value: Some("a1b2c3".into())
+                },
+                Mark {
+                    seq: 8,
+                    value: None
+                }
+            ]
+        );
+        // Пульс сканером снимков не ловится.
+        assert!(s.feed(b"rustdroid: hb 9\n").is_empty());
     }
 
     #[test]
     fn buffer_stays_small() {
-        let mut s = Scanner::default();
+        let mut s = Scanner::new(HB);
         for _ in 0..1000 {
             assert!(s.feed(&[b'a'; 100]).is_empty());
         }

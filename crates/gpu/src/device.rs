@@ -180,6 +180,8 @@ struct ThreeD {
     /// Перечитывание последнего кадра после затишья (см. [`crate::refresh`]).
     refresh: crate::refresh::Plan,
     refresh_timer: Option<crate::refresh::Timer>,
+    /// Меняется ли содержимое кадров (диагностика «замирания»).
+    content: crate::refresh::Content,
 }
 
 impl ThreeD {
@@ -362,6 +364,7 @@ impl VirtioGpu {
             fences,
             refresh: crate::refresh::Plan::default(),
             refresh_timer,
+            content: crate::refresh::Content::new(Instant::now()),
             contexts: HashSet::new(),
             resources: HashMap::new(),
             pending: Vec::new(),
@@ -967,6 +970,15 @@ fn publish_3d(t: &mut ThreeD, mailbox: &Mailbox, id: u32) {
     if let Err(e) = t.backend.read_pixels(id, width, height, &mut data) {
         tracing::debug!(id, error = %e, "кадр 3D-ресурса не прочитан");
         return;
+    }
+    if let Some((frames, changed, hash)) = t.content.frame(&data, Instant::now()) {
+        tracing::info!(
+            frames,
+            changed,
+            hash = format_args!("{hash:016x}"),
+            resource = id,
+            "содержимое кадров scanout"
+        );
     }
     mailbox.publish(Frame {
         width,

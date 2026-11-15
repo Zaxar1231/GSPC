@@ -674,7 +674,7 @@ if ($Stages -contains 3 -and $images -and (Test-Path $Exe)) {
     }
     # Профиль: загрузка CPU по потокам и время команд virtio-gpu (раз в 10 с).
     $perf = Select-String -Path (Join-Path $Out 'stage3-stderr.log'), (Join-Path $Out 'stage3-stdout.log') `
-        -Pattern 'кадры гостя', 'профиль CPU', 'время команд virtio-gpu', 'пульс гостя' -SimpleMatch -Encoding UTF8 -ErrorAction SilentlyContinue
+        -Pattern 'кадры гостя', 'профиль CPU', 'время команд virtio-gpu', 'пульс гостя', 'содержимое кадров', 'снимок экрана гостя' -SimpleMatch -Encoding UTF8 -ErrorAction SilentlyContinue
     if ($perf) {
         $perf | ForEach-Object { $_.Line -replace '\x1b\[[0-9;]*m', '' } |
             Set-Content (Join-Path $Out 'stage3-perf.txt') -Encoding UTF8
