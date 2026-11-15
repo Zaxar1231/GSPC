@@ -61,10 +61,10 @@ pub(crate) const GFXSTREAM_GUEST_ANGLE: &[(&str, &str)] = &[
     ("androidboot.lcd_density", "240"),
 ];
 
-/// Параметры bootconfig для 3D через gfxstream на OpenGL хоста (уровень 2, видеокарты без
+/// Параметры bootconfig для 3D через gfxstream на GLES хоста (уровень 2, видеокарты без
 /// Vulkan; как `gpu_mode=gfxstream` у Cuttlefish): GLES в госте — драйвер gfxstream (`emulation`),
-/// команды GLES идут в virtio-gpu и исполняются на хосте через OpenGL драйвера. GLES 3.0: для
-/// 3.1 хосту нужен OpenGL 4.3, а у Intel HD 2500 — 4.0. Vulkan гостя (`ranchu`) без Vulkan
+/// команды GLES идут в virtio-gpu и исполняются на хосте через ANGLE поверх Direct3D 11. GLES 3.0:
+/// ANGLE на D3D11 даёт 3.0 (3.1 — не на всех видеокартах). Vulkan гостя (`ranchu`) без Vulkan
 /// хоста видеокарт не находит, приложения рисуют через GLES.
 pub(crate) const GFXSTREAM_GUEST_GLES: &[(&str, &str)] = &[
     ("androidboot.hardware.gralloc", "minigbm"),
@@ -97,8 +97,12 @@ pub(crate) fn renderer_flags(gpu: GpuMode) -> Option<u32> {
     match gpu {
         GpuMode::Software => None,
         GpuMode::Gfxstream => Some(gfx_flags::USE_VK | gfx_flags::USE_SURFACELESS),
-        // Без USE_EGL: на Windows gfxstream берёт OpenGL драйвера через WGL, а не ANGLE.
-        GpuMode::GfxstreamGl => Some(gfx_flags::USE_GLES | gfx_flags::USE_SURFACELESS),
+        // USE_EGL: GLES хоста — ANGLE (libEGL/libGLESv2 рядом с rustdroid.exe) поверх D3D11.
+        // OpenGL драйвера через WGL не годится: шейдеры GLSL ES без транслятора ANGLE не
+        // компилируются (см. docs/stage-4.md, 4.6).
+        GpuMode::GfxstreamGl => {
+            Some(gfx_flags::USE_EGL | gfx_flags::USE_GLES | gfx_flags::USE_SURFACELESS)
+        }
     }
 }
 
@@ -358,7 +362,8 @@ mod tests {
         assert_eq!(renderer_flags(GpuMode::Software), None);
         let gl_flags = renderer_flags(GpuMode::GfxstreamGl).unwrap_or(0);
         assert_ne!(gl_flags & gfx_flags::USE_GLES, 0);
-        assert_eq!(gl_flags & (gfx_flags::USE_VK | gfx_flags::USE_EGL), 0);
+        assert_ne!(gl_flags & gfx_flags::USE_EGL, 0);
+        assert_eq!(gl_flags & gfx_flags::USE_VK, 0);
         let vk_flags = renderer_flags(GpuMode::Gfxstream).unwrap_or(0);
         assert_ne!(vk_flags & gfx_flags::USE_VK, 0);
     }

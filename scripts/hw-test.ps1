@@ -34,7 +34,7 @@
 
 .PARAMETER Gpu
     Графика этапа 3: auto (по умолчанию: gfxstream на Vulkan, если он прошёл проверку 3D, иначе
-    gfxstream-gl на OpenGL драйвера, иначе software), gfxstream, gfxstream-gl или software.
+    gfxstream-gl на ANGLE/Direct3D 11, иначе software), gfxstream, gfxstream-gl или software.
 
 .PARAMETER CheckOnly
     Только проверка системы и 3D (Vulkan, gfxstream) — без образов и запуска Android, ~1 мин.
@@ -443,6 +443,27 @@ if (Test-Path $Exe) {
         "gfxstream: $gfxCommit, sha256 $have" | Add-Content -Path (Join-Path $Out 'system.txt') -Encoding UTF8
     } catch {
         Warn "Не удалось скачать gfxstream ($_): проверка 3D покажет, что DLL нет"
+    }
+    # ANGLE (libEGL/libGLESv2 на Direct3D 11) — уровень графики 2 для видеокарт без Vulkan.
+    $zip = Join-Path $Work 'angle-windows-x64.zip'
+    $unpacked = Join-Path $Work 'angle'
+    try {
+        Download "https://github.com/$Owner/$RepoName/releases/download/deps-angle/angle-windows-x64.zip" $zip
+        if (Test-Path $unpacked) { Remove-Item $unpacked -Recurse -Force }
+        Expand-Archive -Path $zip -DestinationPath $unpacked -Force
+        foreach ($line in Get-Content (Join-Path $unpacked 'angle.sha256')) {
+            $want, $name = $line -split '\s+', 2
+            if (-not $name) { continue }
+            $f = Join-Path $unpacked $name
+            $have = (Get-FileHash -Algorithm SHA256 $f).Hash.ToLower()
+            if ($have -ne $want.ToLower()) { throw "sha256 $name не совпал: $have" }
+            Copy-Item $f (Split-Path -Parent $Exe) -Force
+        }
+        $angleVer = (Get-Content (Join-Path $unpacked 'angle-version.txt') -Raw).Trim()
+        Ok "ANGLE: libEGL.dll, libGLESv2.dll ($angleVer)"
+        "angle: $angleVer" | Add-Content -Path (Join-Path $Out 'system.txt') -Encoding UTF8
+    } catch {
+        Warn "Не удалось скачать ANGLE ($_): уровень графики 2 (без Vulkan) будет недоступен"
     }
 }
 

@@ -28,7 +28,7 @@ pub(crate) enum Command {
     /// Проверка 3D (Vulkan и gfxstream) в отдельном процессе; её запускает `check`.
     #[command(hide = true)]
     GpuProbe {
-        /// Проверить gfxstream на OpenGL драйвера (уровень 2) вместо Vulkan.
+        /// Проверить gfxstream на ANGLE/Direct3D 11 (уровень 2) вместо Vulkan.
         #[arg(long)]
         gl: bool,
     },
@@ -41,7 +41,7 @@ pub(crate) enum GpuMode {
     Software,
     /// 3D на видеокарте хоста: gfxstream, в госте ANGLE поверх Vulkan.
     Gfxstream,
-    /// 3D для видеокарт без Vulkan: gfxstream на OpenGL драйвера (WGL), в госте драйвер GLES
+    /// 3D для видеокарт без Vulkan: gfxstream на ANGLE (Direct3D 11), в госте драйвер GLES
     /// gfxstream.
     GfxstreamGl,
 }

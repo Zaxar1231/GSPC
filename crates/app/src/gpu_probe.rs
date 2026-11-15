@@ -48,10 +48,13 @@ pub(crate) fn library_path() -> Option<PathBuf> {
 /// Пункт проверки, который ставит дочерний процесс, когда gfxstream запустился (по нему
 /// `hw-test.ps1` выбирает режим графики).
 const GFX_OK_VK: &str = "gfxstream: инициализирован на Vulkan";
-/// То же для OpenGL (уровень 2).
-const GFX_OK_GL: &str = "gfxstream GL: инициализирован на OpenGL";
+/// То же для уровня 2 (ANGLE на Direct3D 11).
+const GFX_OK_GL: &str = "gfxstream GL: инициализирован на ANGLE (Direct3D 11)";
 
-/// Проверка 3D: gfxstream на Vulkan, а если не вышло — на OpenGL драйвера (уровень 2).
+/// DLL ANGLE, которые gfxstream загружает по имени (ищутся рядом с `rustdroid.exe`).
+const ANGLE_DLLS: [&str; 2] = ["libEGL.dll", "libGLESv2.dll"];
+
+/// Проверка 3D: gfxstream на Vulkan, а если не вышло — на ANGLE/Direct3D 11 (уровень 2).
 /// Каждая — в своём процессе: gfxstream инициализируется один раз на процесс.
 pub(crate) fn checks(verbose: u8) -> Vec<Check> {
     let mut v = probe_child(verbose, false);
@@ -235,7 +238,7 @@ fn vulkan() -> bool {
     }
 }
 
-/// gfxstream: загрузка DLL и инициализация на Vulkan или (`gl`) на OpenGL драйвера.
+/// gfxstream: загрузка DLL и инициализация на Vulkan или (`gl`) на ANGLE/Direct3D 11.
 fn gfxstream(gl: bool) -> bool {
     let Some(path) = library_path() else {
         report(
@@ -254,6 +257,24 @@ fn gfxstream(gl: bool) -> bool {
         );
         return false;
     }
+    if gl {
+        let dir = path.parent().unwrap_or(Path::new("."));
+        let missing: Vec<&str> = ANGLE_DLLS
+            .into_iter()
+            .filter(|n| !dir.join(n).exists())
+            .collect();
+        if !missing.is_empty() {
+            report(
+                false,
+                &format!(
+                    "gfxstream GL: нет {} рядом с rustdroid.exe — уровень 2 выключен (DLL ANGLE \
+                     кладёт hw-test.ps1 из pre-release deps-angle)",
+                    missing.join(", ")
+                ),
+            );
+            return false;
+        }
+    }
     match probe_gfxstream(&path, gl) {
         Ok(capsets) => {
             let ok = if gl { GFX_OK_GL } else { GFX_OK_VK };
@@ -271,7 +292,7 @@ fn gfxstream(gl: bool) -> bool {
             false
         }
         Err(e) => {
-            let api = if gl { "OpenGL" } else { "Vulkan" };
+            let api = if gl { "ANGLE (Direct3D 11)" } else { "Vulkan" };
             report(
                 false,
                 &format!("gfxstream: не запустился на {api} ({e}). Подробности — в логе с -v"),
@@ -283,7 +304,7 @@ fn gfxstream(gl: bool) -> bool {
 
 fn probe_gfxstream(path: &Path, gl: bool) -> Result<String, rustdroid_gfxstream::Error> {
     let flags = if gl {
-        step("gfxstream: загрузка DLL и инициализация на OpenGL (WGL)");
+        step("gfxstream: загрузка DLL и инициализация на ANGLE (Direct3D 11)");
         crate::display::renderer_flags(crate::cli::GpuMode::GfxstreamGl).unwrap_or(0)
     } else {
         step("gfxstream: загрузка DLL и инициализация на Vulkan");

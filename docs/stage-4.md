@@ -29,7 +29,7 @@ D3D11 ([ADR 0009](adr/0009-weak-gpu-support.md)).
 | 4.3b | Общая память (shm-область PCI) для `RESOURCE_MAP_BLOB`: host-visible blob-ресурсы, нужные Vulkan гостя | unit-тесты, отображение в WHPX | ✅ (железо — в 4.4) |
 | 4.4 | Параметры гостя для gfxstream (`gpu_mode=gfxstream` у Cuttlefish), выбор уровня графики | загрузочная анимация через GPU | ✅ i3-10110U: Android загружается за 49 с, ввод работает |
 | 4.5 | Zero-copy: Vulkan-образ gfxstream → NT handle → `OpenSharedHandle` в D3D12 | нет копии кадра через CPU | ⏳ |
-| 4.6 | Уровень 2: gfxstream поверх ANGLE-on-D3D11 для GPU без Vulkan | i3-3220 рисует на видеокарте | 🚧 WGL не работает (см. ниже), следующий шаг — ANGLE |
+| 4.6 | Уровень 2: gfxstream поверх ANGLE-on-D3D11 для GPU без Vulkan | i3-3220 рисует на видеокарте | 🚧 ANGLE собирается в CI (`deps-angle`), ждёт проверки на железе |
 | 4.7 | Шейдерный проход композитора: letterbox (сохранение пропорций), масштабирование | пропорции при любом размере окна | 🚧 сделано, ждёт проверки на железе |
 | 4.8 | Кэш шейдеров и пайплайнов на диске, VSync от хоста, VRR | нет статтеров при повторном запуске | ⏳ |
 | 4.9 | Замеры: FPS, 1% low, время кадра на ноутбуке и i3-3220 до/после | таблица в этом документе | 🚧 ноутбук — есть, i3-3220 — после 4.6 |
@@ -136,6 +136,17 @@ OpenGL подведёт.
 в ANGLE напрямую, без перевода в desktop GL. Нужны `libEGL.dll`/`libGLESv2.dll` ANGLE — собирать
 в CI. Пока `rustdroid check` не находит рабочего OpenGL (проверка падает в дочернем процессе), и
 `-Gpu auto` выбирает программный рендер.
+
+**4.6, второй вариант: ANGLE.** Workflow `angle` собирает ANGLE из порта vcpkg (`chromium_7258`,
+коммит vcpkg зафиксирован в `VCPKG_COMMIT`) — `libEGL.dll` и `libGLESv2.dll` с бэкендом
+Direct3D 11 — и публикует их в pre-release `deps-angle`; `hw-test.ps1` кладёт DLL рядом с
+`rustdroid.exe`. `--gpu gfxstream-gl` теперь — `USE_EGL | USE_GLES | USE_SURFACELESS`: транслятор
+GLES gfxstream работает поверх EGL, а библиотеку EGL (`libEGL.dll`) gfxstream загружает по имени,
+то есть ANGLE. Дисплей ANGLE — по умолчанию, на Windows это D3D11 (нужен `d3dcompiler_47.dll`,
+он есть в Windows 10/11). Core profile при этом не включается (`shouldEnableCoreProfile` —
+только для рендерера `host`), шейдеры GLSL ES ANGLE принимает как есть. `rustdroid check`
+проверяет уровень 2, только если рядом есть обе DLL ANGLE. Проверка на железе — `-Gpu gfxstream-gl`
+на любой машине (и с Vulkan тоже), затем на i3-3220.
 
 ## Замеры (4.9)
 
