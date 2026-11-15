@@ -38,6 +38,15 @@ const PROBE_TIMEOUT: Duration = Duration::from_secs(45);
 /// Ссылка на установщик рантайма Visual C++ 2015–2022 (нужен gfxstream).
 const VC_REDIST: &str = "https://aka.ms/vs/17/release/vc_redist.x64.exe";
 
+/// Каких DLL ANGLE нет рядом с DLL gfxstream `gfxstream_dll`.
+pub(crate) fn missing_angle(gfxstream_dll: &Path) -> Vec<&'static str> {
+    let dir = gfxstream_dll.parent().unwrap_or(Path::new("."));
+    ANGLE_DLLS
+        .into_iter()
+        .filter(|n| !dir.join(n).exists())
+        .collect()
+}
+
 /// Путь к DLL gfxstream: рядом с `rustdroid.exe`.
 pub(crate) fn library_path() -> Option<PathBuf> {
     Some(std::env::current_exe().ok()?.parent()?.join(LIBRARY_NAME))
@@ -258,11 +267,7 @@ fn gfxstream(gl: bool) -> bool {
         return false;
     }
     if gl {
-        let dir = path.parent().unwrap_or(Path::new("."));
-        let missing: Vec<&str> = ANGLE_DLLS
-            .into_iter()
-            .filter(|n| !dir.join(n).exists())
-            .collect();
+        let missing = missing_angle(&path);
         if !missing.is_empty() {
             report(
                 false,

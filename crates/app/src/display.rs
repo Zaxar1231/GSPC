@@ -129,6 +129,17 @@ pub(crate) fn attach(devices: &mut VmDevices, spec: DisplaySpec, gpu: GpuMode) -
     if let Some(flags) = renderer_flags(gpu) {
         let path = crate::gpu_probe::library_path()
             .context("не удалось определить каталог rustdroid.exe")?;
+        if gpu == GpuMode::GfxstreamGl {
+            // Без DLL ANGLE gfxstream не падает с ошибкой, а обращается по нулевому указателю.
+            let missing = crate::gpu_probe::missing_angle(&path);
+            if !missing.is_empty() {
+                anyhow::bail!(
+                    "для --gpu gfxstream-gl нужны DLL ANGLE рядом с rustdroid.exe, нет: {} \
+                     (их кладёт hw-test.ps1 из pre-release deps-angle)",
+                    missing.join(", ")
+                );
+            }
+        }
         let fences = FenceSink::new();
         let backend = GfxstreamBackend::new(
             &path,
