@@ -27,9 +27,9 @@ jobs:
         run: rustup target add x86_64-linux-android
 
       - name: Сборка агента (NDK API 31)
-        env:
-          NDK: ${{ env.ANDROID_NDK_LATEST_HOME }}
         run: |
+          # NDK ставит образ раннера и отдаёт путь переменной среды (не контекстом env).
+          NDK="${ANDROID_NDK_LATEST_HOME:-}"
           test -n "$NDK" || { echo 'NDK не найден на раннере'; exit 1; }
           linker="$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/x86_64-linux-android31-clang"
           test -x "$linker" || { echo "нет линкера $linker"; exit 1; }
