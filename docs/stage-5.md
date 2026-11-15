@@ -102,3 +102,12 @@ Init Cuttlefish (`init.cutf_cvm.rc`) при пустом `ro.vendor.disable_rena
 Проверено: клиппи под Linux и Windows, тесты, `cargo check --target x86_64-linux-android`.
 Не проверено: работа в настоящем Android (нужны линковка через NDK и доставка бинарника в образ;
 способ доставки зависит от прав оболочки гостя — см. раздел `id` в `stage3-net.txt`).
+
+## Доставка агента (5.5, без проверки на железе)
+
+`boot-android --agent PATH` (`crates/app/src/agent_push.rs`): когда Android загрузился, shell
+гостя через консоль записывает бинарник в `/data/local/tmp/rustdroid-agent` кусками base64,
+выставляет права и запускает в фоне (`nohup`). Строки `rustdroid: agent written/started` в
+консоли говорят о результате. Предположения, которые надо проверить на железе: доступен
+`base64` (toybox) и разрешена запись в `/data/local/tmp`; путь через консоль медленный
+(бинарник ~730 КБ) и не переживает перезагрузку гостя.

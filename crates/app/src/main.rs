@@ -9,6 +9,7 @@
 //! С `--display` открывается окно с экраном гостя (virtio-gpu 2D, D3D12) и вводом мышью и
 //! клавиатурой. UI в стиле Material Design 3 — на этапе 4.
 
+mod agent_push;
 mod cli;
 #[cfg(windows)]
 mod console;

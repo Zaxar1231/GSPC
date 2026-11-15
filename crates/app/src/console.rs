@@ -577,10 +577,29 @@ pub(crate) fn boot_android(args: &AndroidArgs) -> Result<()> {
         ..VmDevices::default()
     };
     // В окне: экран Android не гаснет (см. ANDROID_WINDOW_SETUP).
-    let setup = args.vm.display.is_some().then(|| {
-        let mut script = ANDROID_WINDOW_SETUP.to_owned();
+    let agent_script = match &args.vm.agent {
+        Some(path) => {
+            let bin = std::fs::read(path)
+                .with_context(|| format!("не удалось прочитать агент {}", path.display()))?;
+            tracing::info!(
+                bytes = bin.len(),
+                "агент гостя будет доставлен через консоль"
+            );
+            Some(crate::agent_push::push_script(&bin))
+        }
+        None => None,
+    };
+    let setup = (args.vm.display.is_some() || agent_script.is_some()).then(|| {
+        let mut script = if args.vm.display.is_some() {
+            ANDROID_WINDOW_SETUP.to_owned()
+        } else {
+            String::new()
+        };
         if args.vm.net == NetMode::User {
             script.push_str(NET_DIAG);
+        }
+        if let Some(agent) = &agent_script {
+            script.push_str(agent);
         }
         script
     });

@@ -120,6 +120,11 @@ pub(crate) struct VmArgs {
     #[arg(long, value_enum, default_value_t = GpuMode::Software)]
     pub gpu: GpuMode,
 
+    /// Гостевой агент (бинарник rustdroid-agent для Android): доставляется в гость через
+    /// консоль и запускается. Пока не проверено на железе.
+    #[arg(long)]
+    pub agent: Option<std::path::PathBuf>,
+
     /// Сеть гостя: `user` — virtio-net с NAT в пользовательском режиме (интернет через сеть
     /// хоста без драйверов и прав администратора), `none` — без сети.
     #[arg(long, value_enum, default_value_t = NetMode::None)]
