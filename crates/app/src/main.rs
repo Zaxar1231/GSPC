@@ -20,6 +20,8 @@ mod display;
 mod gpu_probe;
 #[cfg(windows)]
 mod preflight;
+#[cfg_attr(not(windows), allow(dead_code))]
+mod pulse;
 
 use anyhow::Result;
 use clap::Parser;

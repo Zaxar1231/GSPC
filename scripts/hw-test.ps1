@@ -589,8 +589,10 @@ if ($Stages -contains 3 -and $images -and (Test-Path $Exe)) {
     Say '    4) для замера скорости: 30 секунд подряд листайте список (Настройки или все' 'Yellow'
     Say '       приложения) и запомните FPS в оверлее. На неподвижном экране Android не рисует' 'Yellow'
     Say '       новых кадров — FPS там не показатель.' 'Yellow'
-    Say '  Когда Android загрузится, скрипт подаст звук. Проверьте и закройте окно —' 'Yellow'
-    Say "  ждать все $Stage3Seconds с не нужно." 'Yellow'
+    Say '    5) проверка зависания: 3 минуты НЕ трогайте окно (мышь в сторону). Смотрите на часы' 'Yellow'
+    Say '       в строке состояния: идут ли минуты, не замирает ли картинка. Потом коснитесь.' 'Yellow'
+    Say '  Когда Android загрузится, скрипт подаст звук. Пройдите все пункты и закройте окно —' 'Yellow'
+    Say "  ждать все $Stage3Seconds с не нужно (но пункт 5 — обязательно 3 минуты)." 'Yellow'
     Say '  Скриншоты окна делаются автоматически раз в 30 секунд (только окно RustDroid).' 'Yellow'
     if (-not $Yes) { Read-Host '  Нажмите Enter, чтобы начать' | Out-Null }
 
@@ -672,11 +674,21 @@ if ($Stages -contains 3 -and $images -and (Test-Path $Exe)) {
     }
     # Профиль: загрузка CPU по потокам и время команд virtio-gpu (раз в 10 с).
     $perf = Select-String -Path (Join-Path $Out 'stage3-stderr.log'), (Join-Path $Out 'stage3-stdout.log') `
-        -Pattern 'кадры гостя', 'профиль CPU', 'время команд virtio-gpu' -SimpleMatch -Encoding UTF8 -ErrorAction SilentlyContinue
+        -Pattern 'кадры гостя', 'профиль CPU', 'время команд virtio-gpu', 'пульс гостя' -SimpleMatch -Encoding UTF8 -ErrorAction SilentlyContinue
     if ($perf) {
         $perf | ForEach-Object { $_.Line -replace '\x1b\[[0-9;]*m', '' } |
             Set-Content (Join-Path $Out 'stage3-perf.txt') -Encoding UTF8
         Ok 'stage3: профиль производительности в stage3-perf.txt'
+    }
+    # Пульс гостя: строка раз в 5 с из shell гостя; опоздание — гость не просыпался по таймеру.
+    $late = Select-String -Path (Join-Path $Out 'stage3-stderr.log'), (Join-Path $Out 'stage3-stdout.log') `
+        -Pattern 'пульс гостя: опоздание' -SimpleMatch -Encoding UTF8 -ErrorAction SilentlyContinue
+    if ($late) {
+        Warn "stage3: пульс гостя опаздывал $(@($late).Count) раз — гость засыпал дольше таймера"
+    } elseif (Select-String -Path $serial -Pattern 'rustdroid: hb ' -SimpleMatch -Quiet -ErrorAction SilentlyContinue) {
+        Ok 'stage3: пульс гостя без опозданий'
+    } else {
+        Warn 'stage3: нет пульса гостя в консоли'
     }
 
     Step 'Ваши наблюдения'
@@ -688,6 +700,7 @@ if ($Stages -contains 3 -and $images -and (Test-Path $Exe)) {
             'Работает ли ввод с клавиатуры?',
             'Работают ли Esc/правый клик («Назад»), F2 («Домой»), F3 («Недавние»)?',
             'Видны ли оверлей FPS и график в углу?',
+            'За 3 минуты без касаний: шли ли часы, замирала ли картинка? (через сколько)',
             'Какой FPS в оверлее, пока листаете список? (число или «не мерил»)',
             'Что-то ещё (подвисания, артефакты, ошибки)?')) {
         $a = if ($Yes) { '(не спрашивали: -Yes)' } else { Read-Host "  $q" }

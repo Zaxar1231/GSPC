@@ -4,7 +4,7 @@ use std::fs::File;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, PoisonError};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 use rustdroid_devices::cf_services::{OemLock, SensorsControl, ServiceEndpoint};
@@ -25,7 +25,7 @@ use windows::Win32::System::Console::{
 };
 
 use crate::cli::{AndroidArgs, BootArgs, ConsoleKind, DiskSpec, DisplaySpec, VmArgs};
-use crate::display;
+use crate::{display, pulse};
 
 /// Префикс управляющих комбинаций (как в QEMU): Ctrl+A.
 const ESCAPE: u8 = 0x01;
@@ -34,6 +34,44 @@ const ESCAPE: u8 = 0x01;
 #[derive(Clone)]
 struct ConsoleOut {
     log: Option<Arc<Mutex<File>>>,
+    pulse: Arc<Mutex<PulseWatch>>,
+}
+
+/// Разбор пульса гостя в выводе консоли (см. [`crate::pulse`]).
+struct PulseWatch {
+    start: Instant,
+    scanner: pulse::Scanner,
+    tracker: pulse::Tracker,
+}
+
+impl PulseWatch {
+    fn new() -> Self {
+        Self {
+            start: Instant::now(),
+            scanner: pulse::Scanner::default(),
+            tracker: pulse::Tracker::default(),
+        }
+    }
+
+    fn feed(&mut self, bytes: &[u8]) {
+        for seq in self.scanner.feed(bytes) {
+            let beat = self.tracker.beat(self.start.elapsed().as_secs_f64(), seq);
+            if beat.late >= pulse::LATE_SECS {
+                tracing::warn!(
+                    seq,
+                    late_s = format_args!("{:.1}", beat.late),
+                    "пульс гостя: опоздание — гость не просыпался по таймеру"
+                );
+            } else if seq % 12 == 0 {
+                tracing::info!(
+                    beats = self.tracker.beats,
+                    late = self.tracker.late_count,
+                    max_late_s = format_args!("{:.2}", self.tracker.max_late),
+                    "пульс гостя"
+                );
+            }
+        }
+    }
 }
 
 impl Write for ConsoleOut {
@@ -41,6 +79,10 @@ impl Write for ConsoleOut {
         let mut out = std::io::stdout().lock();
         out.write_all(buf)?;
         out.flush()?;
+        self.pulse
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .feed(buf);
         if let Some(f) = &self.log {
             f.lock()
                 .unwrap_or_else(PoisonError::into_inner)
@@ -187,7 +229,10 @@ fn open_log(path: Option<&PathBuf>) -> Result<ConsoleOut> {
         .map(|p| File::create(p).with_context(|| format!("не удалось создать {}", p.display())))
         .transpose()?
         .map(|f| Arc::new(Mutex::new(f)));
-    Ok(ConsoleOut { log })
+    Ok(ConsoleOut {
+        log,
+        pulse: Arc::new(Mutex::new(PulseWatch::new())),
+    })
 }
 
 /// `--cpus 0` — подобрать по числу логических процессоров хоста.
@@ -228,15 +273,19 @@ const GUEST_SETUP_DELAY: Duration = Duration::from_secs(20);
 /// пока окно открыто, — у эмулятора нет кнопки питания, а погасший экран выглядит как
 /// остановившееся приложение. UWB выключается: HAL UWB Cuttlefish ждёт симулятор на хосте,
 /// которого у нас нет, и на ошибку Android запускает полный bugreport (минуты нагрузки на CPU).
-/// Ввод команд — из `/dev/null`: фоновая задача, читающая терминал, останавливается (SIGTTIN),
-/// а `cmd`/`svc` подключают stdin к службе. Каждая команда — с тайм-аутом и строкой `rustdroid: setup rc=…` в логе консоли; маркер в
-/// конце — что настройка дошла до конца.
-const ANDROID_WINDOW_SETUP: &str = "(while [ \"$(getprop sys.boot_completed)\" != 1 ]; do sleep 2; done; \
+/// `set +m` выключает управление заданиями: фоновая задача остаётся в группе процессов shell,
+/// которая на терминале «передняя», и не останавливается сигналами SIGTTIN/SIGTTOU (раньше
+/// настройка замирала на `svc`, top показывал остановленный процесс). Ввод команд — из
+/// `/dev/null`: `cmd`/`svc` подключают stdin к службе. Каждая команда — с тайм-аутом и строкой
+/// `rustdroid: setup rc=…` в логе консоли; маркер `guest setup done` — что настройка дошла до
+/// конца. Затем — пульс гостя `rustdroid: hb N` каждые 5 с (см. [`crate::pulse`]).
+const ANDROID_WINDOW_SETUP: &str = "set +m; (while [ \"$(getprop sys.boot_completed)\" != 1 ]; do sleep 2; done; \
 for c in 'settings put system screen_off_timeout 2147483647' \
 'settings put global stay_on_while_plugged_in 7' 'svc power stayon true' \
 'locksettings set-disabled true' 'cmd uwb disable-uwb'; do \
 timeout 30 $c </dev/null >/dev/null 2>&1; echo \"rustdroid: setup rc=$? $c\"; done; \
-echo rustdroid: guest setup done) &\n";
+echo rustdroid: guest setup done; n=0; while :; do sleep 5; n=$((n+1)); \
+echo \"rustdroid: hb $n\"; done) </dev/null &\n";
 
 /// Отдаёт `script` shell на консоли гостя через [`GUEST_SETUP_DELAY`].
 fn spawn_guest_setup(console: ConsoleHandle, script: &'static str) -> std::io::Result<()> {
