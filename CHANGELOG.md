@@ -103,6 +103,11 @@
 
 ### Fixed
 
+- ANGLE из vcpkg собирался без синхронизации контекстов с общими объектами
+  (`ANGLE_ENABLE_SHARE_CONTEXT_LOCK`, `ANGLE_ENABLE_CONTEXT_MUTEX`), и `--gpu gfxstream-gl` падал
+  в `libGLESv2.dll` через ~25 с после старта Android: gfxstream рисует из нескольких потоков.
+  Теперь ANGLE собирается со своим triplet vcpkg, где оба макроса включены; PDB ANGLE
+  публикуются отдельным архивом.
 - `--gpu gfxstream-gl` без DLL ANGLE падал внутри gfxstream (`0xC0000005`); теперь rustdroid
   сразу пишет, каких DLL не хватает.
 - Картинка «замирала», пока окно не трогали, и оживала от касания: с gfxstream кадр читался из

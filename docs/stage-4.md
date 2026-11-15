@@ -148,6 +148,16 @@ GLES gfxstream работает поверх EGL, а библиотеку EGL (`
 проверяет уровень 2, только если рядом есть обе DLL ANGLE. Проверка на железе — `-Gpu gfxstream-gl`
 на любой машине (и с Vulkan тоже), затем на i3-3220.
 
+**Первый запуск на i5-8300H (GTX 1050, `-Gpu gfxstream-gl`).** gfxstream поднялся на
+«ANGLE (NVIDIA GeForce GTX 1050 Direct3D11 vs_5_0 ps_5_0)», OpenGL ES 3.0; Android дошёл до
+SurfaceFlinger и zygote, кадры пошли, но через ~25 с процесс упал в `libGLESv2.dll` (чтение по
+адресу 0x8) из `glDrawArrays` транслятора gfxstream. Причина — сборка ANGLE: в GN по умолчанию
+включены `ANGLE_ENABLE_SHARE_CONTEXT_LOCK` и `ANGLE_ENABLE_CONTEXT_MUTEX` (синхронизация
+контекстов с общими объектами), а CMake-сборка vcpkg их не задаёт; gfxstream же рисует из
+нескольких потоков с общими контекстами. Workflow собирает ANGLE со своим triplet
+(`third_party/vcpkg-triplets/x64-windows-release-angle.cmake`), где оба макроса включены, и
+публикует PDB ANGLE отдельным архивом.
+
 ## Замеры (4.9)
 
 `hw-test.ps1`, этап 3, gfxstream, экран гостя 1280×720@60, прокрутка списка 30 с; FPS — по
