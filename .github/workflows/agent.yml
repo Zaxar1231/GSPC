@@ -1,0 +1,60 @@
+name: agent
+
+# Сборка гостевого агента `rustdroid-agent` под Android (x86_64-linux-android) через NDK
+# раннера GitHub. Результат — pre-release `deps-agent`: сборка и образ гостя берут бинарник
+# оттуда. Линковка проверяется здесь же (cargo check без линкера её не проверяет).
+
+on:
+  push:
+    paths: [".github/workflows/agent.yml", "crates/guest-agent/**", "crates/devices/src/agent.rs"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: agent
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Цель Android для Rust
+        run: rustup target add x86_64-linux-android
+
+      - name: Сборка агента (NDK API 31)
+        env:
+          NDK: ${{ env.ANDROID_NDK_LATEST_HOME }}
+        run: |
+          test -n "$NDK" || { echo 'NDK не найден на раннере'; exit 1; }
+          linker="$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/x86_64-linux-android31-clang"
+          test -x "$linker" || { echo "нет линкера $linker"; exit 1; }
+          export CARGO_TARGET_X86_64_LINUX_ANDROID_LINKER="$linker"
+          cargo build --release --target x86_64-linux-android -p rustdroid-guest-agent
+          bin=target/x86_64-linux-android/release/rustdroid-agent
+          file "$bin" || true
+          mkdir -p out
+          cp "$bin" out/rustdroid-agent
+          sha256sum out/rustdroid-agent | tee out/rustdroid-agent.sha256
+          echo "built-from=${GITHUB_SHA}" > out/build.txt
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rustdroid-agent-x86_64-android
+          path: out/
+
+      - name: Публикация в pre-release deps-agent
+        if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/feat/')
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          gh release delete deps-agent --cleanup-tag --yes 2>/dev/null || true
+          gh release create deps-agent --prerelease --target "$GITHUB_SHA" \
+            --title 'Гостевой агент (x86_64 Android)' \
+            --notes "rustdroid-agent из коммита $GITHUB_SHA" \
+            out/rustdroid-agent out/rustdroid-agent.sha256
