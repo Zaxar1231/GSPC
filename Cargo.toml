@@ -5,6 +5,7 @@ members = [
     "crates/vmm",
     "crates/virtio",
     "crates/devices",
+    "crates/net",
     "crates/gpu",
     "crates/gfxstream",
     "crates/present",
@@ -36,6 +37,7 @@ rustdroid-whpx = { path = "crates/whpx" }
 rustdroid-vmm = { path = "crates/vmm" }
 rustdroid-virtio = { path = "crates/virtio" }
 rustdroid-devices = { path = "crates/devices" }
+rustdroid-net = { path = "crates/net" }
 rustdroid-gpu = { path = "crates/gpu" }
 rustdroid-gfxstream = { path = "crates/gfxstream" }
 rustdroid-present = { path = "crates/present" }
@@ -56,6 +58,7 @@ serde_json = "1"
 criterion = { version = "0.8", default-features = false, features = ["cargo_bench_support"] }
 windows = { version = "0.62", default-features = false, features = ["std"] }
 vm-superio = "0.8"
+
 sha2 = "0.11"
 crc32fast = "1.5"
 clap = { version = "4", features = ["derive"] }
