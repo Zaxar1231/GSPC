@@ -7,8 +7,8 @@
 use std::cell::{Cell, RefCell};
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, RECT, WPARAM};
-use windows::Win32::Graphics::Gdi::{BLACK_BRUSH, GetStockObject, HBRUSH};
+use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
+use windows::Win32::Graphics::Gdi::{BLACK_BRUSH, GetStockObject, HBRUSH, ScreenToClient};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::HiDpi::{
     DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, SetProcessDpiAwarenessContext,
@@ -19,9 +19,9 @@ use windows::Win32::UI::WindowsAndMessaging::{
     DestroyWindow, DispatchMessageW, GetClientRect, GetMessageW, IDC_ARROW, LoadCursorW, MSG,
     PostMessageW, PostQuitMessage, RegisterClassExW, SPI_GETWORKAREA, SW_SHOW,
     SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS, ShowWindow, SystemParametersInfoW, TranslateMessage,
-    WM_CLOSE, WM_DESTROY, WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE,
-    WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SYSKEYDOWN, WM_SYSKEYUP, WNDCLASSEXW, WS_EX_APPWINDOW,
-    WS_OVERLAPPEDWINDOW,
+    WHEEL_DELTA, WM_CLOSE, WM_DESTROY, WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDOWN, WM_LBUTTONUP,
+    WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SYSKEYDOWN, WM_SYSKEYUP,
+    WNDCLASSEXW, WS_EX_APPWINDOW, WS_OVERLAPPEDWINDOW,
 };
 use windows::core::{PCWSTR, w};
 
@@ -51,6 +51,16 @@ pub enum WindowEvent {
     Secondary {
         /// Кнопка нажата.
         down: bool,
+    },
+    /// Колесо мыши над окном: положение курсора в долях экрана гостя и число щелчков
+    /// (положительное — колесо от себя).
+    Wheel {
+        /// X.
+        x: f32,
+        /// Y.
+        y: f32,
+        /// Щелчки колеса (`WHEEL_DELTA` = 1), бывают дробными у точных колёс и тачпадов.
+        notches: f32,
     },
     /// Пользователь закрывает окно.
     Close,
@@ -103,15 +113,25 @@ pub fn enable_dpi_awareness() {
     }
 }
 
-fn client_point(hwnd: HWND, lparam: LPARAM) -> (f32, f32) {
+/// Координаты из `lParam` сообщений мыши (знаковые младшие/старшие 16 бит).
+fn lparam_point(lparam: LPARAM) -> (i32, i32) {
     #[allow(
         clippy::cast_possible_truncation,
         reason = "координаты мыши — младшие/старшие 16 бит"
     )]
-    let (x, y) = (
+    (
         i32::from(lparam.0 as i16),
         i32::from((lparam.0 >> 16) as i16),
-    );
+    )
+}
+
+fn client_point(hwnd: HWND, lparam: LPARAM) -> (f32, f32) {
+    let (x, y) = lparam_point(lparam);
+    frame_point(hwnd, x, y)
+}
+
+/// Точка клиентской области окна в долях экрана гостя.
+fn frame_point(hwnd: HWND, x: i32, y: i32) -> (f32, f32) {
     let mut r = RECT::default();
     // SAFETY: окно валидно, выходная структура локальная.
     let _ = unsafe { GetClientRect(hwnd, &raw mut r) };
@@ -156,6 +176,20 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
             let _ = unsafe { ReleaseCapture() };
             let (x, y) = client_point(hwnd, lparam);
             emit(WindowEvent::Pointer { x, y, down: false });
+            LRESULT(0)
+        }
+        WM_MOUSEWHEEL => {
+            // У WM_MOUSEWHEEL координаты экранные.
+            let (sx, sy) = lparam_point(lparam);
+            let mut p = POINT { x: sx, y: sy };
+            // SAFETY: окно валидно, точка локальная.
+            let _ = unsafe { ScreenToClient(hwnd, &raw mut p) };
+            let (x, y) = frame_point(hwnd, p.x, p.y);
+            #[allow(clippy::cast_possible_truncation, reason = "старшие 16 бит wParam")]
+            let delta = i32::from((wparam.0 >> 16) as u16 as i16);
+            #[allow(clippy::cast_precision_loss, reason = "малые значения")]
+            let notches = delta as f32 / WHEEL_DELTA as f32;
+            emit(WindowEvent::Wheel { x, y, notches });
             LRESULT(0)
         }
         WM_RBUTTONDOWN | WM_RBUTTONUP => {

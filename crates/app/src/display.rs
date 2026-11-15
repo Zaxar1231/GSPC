@@ -5,8 +5,10 @@
 //! - `vm`: vCPU гостя;
 //! - `present`: композитор, ждёт кадр гостя и выводит его, не завися от UI.
 
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{self, Receiver};
+use std::sync::{Arc, Mutex, PoisonError};
+use std::time::Duration;
 
 use anyhow::{Context, Result};
 use rustdroid_devices::input::key_events;
@@ -175,6 +177,43 @@ fn to_panel(frac: f32, size: u32) -> u32 {
     (frac.clamp(0.0, 1.0) * size.saturating_sub(1) as f32).round() as u32
 }
 
+/// Слот мультитача левой кнопки мыши.
+const MOUSE_SLOT: u32 = 0;
+/// Слот «пальца» прокрутки колесом: отдельный, чтобы не мешать нажатой кнопке.
+const WHEEL_SLOT: u32 = 1;
+
+/// Поток прокрутки колесом: щелчки, пришедшие во время жеста, складываются в следующий жест
+/// (см. [`rustdroid_input::wheel`]).
+fn wheel_loop(
+    rx: &Receiver<(f32, f32, f32)>,
+    touch: &rustdroid_vmm::InputHandle,
+    state: &Mutex<TouchState>,
+    w: u32,
+    h: u32,
+) {
+    while let Ok((x, mut y, mut notches)) = rx.recv() {
+        // Всё, что накопилось, — одним жестом (курсор — последний).
+        while let Ok((_, ny, n)) = rx.try_recv() {
+            y = ny;
+            notches += n;
+        }
+        for step in rustdroid_input::wheel::plan(y, notches) {
+            if step.delay_ms > 0 {
+                std::thread::sleep(Duration::from_millis(step.delay_ms));
+            }
+            let mut st = state.lock().unwrap_or_else(PoisonError::into_inner);
+            let events = match step.y {
+                Some(fy) => st.touch(WHEEL_SLOT, to_panel(x, w), to_panel(fy, h)),
+                None => st.release(WHEEL_SLOT),
+            };
+            drop(st);
+            if !events.is_empty() {
+                touch.push(&events);
+            }
+        }
+    }
+}
+
 /// Запускает ВМ с окном; возвращается, когда ВМ остановилась или окно закрыто.
 pub(crate) fn run(machine: Vm, screen: Screen, vm: &VmArgs) -> Result<(RunOutcome, ExitStats)> {
     window::enable_dpi_awareness();
@@ -184,19 +223,36 @@ pub(crate) fn run(machine: Vm, screen: Screen, vm: &VmArgs) -> Result<(RunOutcom
     let stopper = machine.stopper();
     let (w, h) = (screen.spec.width, screen.spec.height);
 
-    let mut touch_state = TouchState::default();
+    let touch_state = Arc::new(Mutex::new(TouchState::default()));
+    let wheel = touch.clone().and_then(|t| {
+        let (tx, rx) = mpsc::channel();
+        let state = Arc::clone(&touch_state);
+        std::thread::Builder::new()
+            .name("wheel".into())
+            .spawn(move || wheel_loop(&rx, &t, &state, w, h))
+            .map_err(|e| tracing::warn!(error = %e, "поток прокрутки колесом не запущен"))
+            .ok()
+            .map(|_| tx)
+    });
     let close_stopper = stopper.clone();
     let handler = move |e: WindowEvent| match e {
         WindowEvent::Pointer { x, y, down } => {
             if let Some(t) = &touch {
+                let mut st = touch_state.lock().unwrap_or_else(PoisonError::into_inner);
                 let events = if down {
-                    touch_state.touch(0, to_panel(x, w), to_panel(y, h))
+                    st.touch(MOUSE_SLOT, to_panel(x, w), to_panel(y, h))
                 } else {
-                    touch_state.release(0)
+                    st.release(MOUSE_SLOT)
                 };
+                drop(st);
                 if !events.is_empty() {
                     t.push(&events);
                 }
+            }
+        }
+        WindowEvent::Wheel { x, y, notches } => {
+            if let Some(tx) = &wheel {
+                let _ = tx.send((x, y, notches));
             }
         }
         WindowEvent::Key {
