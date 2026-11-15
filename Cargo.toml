@@ -38,6 +38,7 @@ rustdroid-vmm = { path = "crates/vmm" }
 rustdroid-virtio = { path = "crates/virtio" }
 rustdroid-devices = { path = "crates/devices" }
 rustdroid-net = { path = "crates/net" }
+rustdroid-guest-agent = { path = "crates/guest-agent" }
 rustdroid-gpu = { path = "crates/gpu" }
 rustdroid-gfxstream = { path = "crates/gfxstream" }
 rustdroid-present = { path = "crates/present" }

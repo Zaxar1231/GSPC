@@ -10,6 +10,12 @@
 
 ### Added
 
+- vsock: службы хоста на портах (`VsockService`), данные гостя доходят до службы, ответы уходят
+  с учётом кредита гостя (`buf_alloc`/`fwd_cnt`), исходящие данные из любого потока —
+  `VsockOutbox`. Протокол гостевого агента (`rustdroid_agent::proto`: hello, активное
+  приложение, установка APK кусками) и его хост-сторона `rustdroid_devices::agent`
+  (`AgentHost::foreground()`, `install()`); служба зарегистрирована в `boot-android` на порту
+  40000. Агент в госте — следующий шаг (`docs/stage-5.md`).
 - Сеть гостя (этап 5.2): устройство virtio-net (`crates/devices/src/net`) с NAT из
   `rustdroid-net`, флаг `boot-android --net user` (по умолчанию `none`), DNS хоста через
   `GetNetworkParams`. `hw-test.ps1` включает сеть сам (`-NoNet` — без неё) и собирает

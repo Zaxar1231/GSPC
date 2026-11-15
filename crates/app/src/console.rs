@@ -10,7 +10,7 @@ use anyhow::{Context, Result, bail};
 use rustdroid_devices::cf_services::{OemLock, SensorsControl, ServiceEndpoint};
 use rustdroid_devices::{
     CompositeDisk, ConsoleInput, CowDisk, Disk, Partition, RawDisk, Serial16550, SparseDisk,
-    ZeroDisk, open_image,
+    VsockOutbox, ZeroDisk, open_image,
 };
 use rustdroid_instance::DataDirs;
 use rustdroid_instance::android::{
@@ -565,10 +565,15 @@ pub(crate) fn boot_android(args: &AndroidArgs) -> Result<()> {
         })
         .collect();
 
+    // Служба агента гостя на vsock: активное приложение и установка APK (этап 5).
+    let outbox = VsockOutbox::new();
+    let (agent, _agent_host) = rustdroid_devices::agent::new(Arc::clone(&outbox));
     let devices = VmDevices {
         disks: vec![("android".into(), Arc::new(disk))],
         extra_consoles,
         vsock_cid: Some(GUEST_CID),
+        vsock_services: vec![(rustdroid_devices::agent::AGENT_PORT, Box::new(agent))],
+        vsock_outbox: Some(outbox),
         ..VmDevices::default()
     };
     // В окне: экран Android не гаснет (см. ANDROID_WINDOW_SETUP).

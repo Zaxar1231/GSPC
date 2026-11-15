@@ -8,7 +8,8 @@ use std::time::{Duration, Instant};
 
 use rustdroid_devices::{
     CmosRtc, ConsoleInput, Disk, InputEvent, InputEvents, InputKind, NetBackend, NetWake,
-    Serial16550, VirtioBlk, VirtioConsole, VirtioInput, VirtioNet, VirtioVsock,
+    Serial16550, VirtioBlk, VirtioConsole, VirtioInput, VirtioNet, VirtioVsock, VsockOutbox,
+    VsockService,
 };
 use rustdroid_gpu::backend::ShmMapper;
 use rustdroid_gpu::{Backend3d, DisplayMode, FenceSink, Mailbox, VirtioGpu};
@@ -85,6 +86,10 @@ pub struct VmDevices {
     pub extra_consoles: Vec<(String, Box<dyn Write + Send>, Arc<ConsoleInput>)>,
     /// virtio-vsock с указанным CID гостя.
     pub vsock_cid: Option<u64>,
+    /// Службы хоста на портах vsock (порт хоста, служба). К остальным портам хост «чёрная дыра».
+    pub vsock_services: Vec<(u32, Box<dyn VsockService>)>,
+    /// Ящик исходящих данных служб vsock (его будильник связывается с очередью приёма).
+    pub vsock_outbox: Option<Arc<VsockOutbox>>,
     /// virtio-gpu: режим дисплея и ящик кадров для композитора.
     pub gpu: Option<(DisplayMode, Arc<Mailbox>)>,
     /// 3D для virtio-gpu: бэкенд (gfxstream) и приёмник его фенсов. Без него — только 2D.
@@ -398,7 +403,7 @@ impl Vm {
     /// Гипервизор недоступен, файлы не читаются, образ некорректен или не хватает памяти.
     pub fn new(
         cfg: &VmConfig,
-        devices: VmDevices,
+        mut devices: VmDevices,
         serial_out: Box<dyn Write + Send>,
     ) -> Result<Self> {
         caps::ensure_available()?;
@@ -552,8 +557,16 @@ impl Vm {
                 function: f,
             });
         }
+        let vsock_outbox = devices.vsock_outbox.clone();
         if let Some(cid) = devices.vsock_cid {
-            add("vsock".into(), Box::new(VirtioVsock::new(cid)))?;
+            let mut dev = VirtioVsock::new(cid);
+            if let Some(outbox) = &devices.vsock_outbox {
+                dev = dev.with_services(
+                    std::mem::take(&mut devices.vsock_services),
+                    Arc::clone(outbox),
+                );
+            }
+            add("vsock".into(), Box::new(dev))?;
         }
         let mut net_wake = None;
         if let Some((backend, wake)) = devices.net {
@@ -613,6 +626,12 @@ impl Vm {
             {
                 // Фенсы gfxstream будят обработку очереди управления virtio-gpu.
                 fences.set_waker(w.kicker(rustdroid_gpu::device::CONTROL_QUEUE));
+            }
+            if name == "vsock"
+                && let Some(outbox) = &vsock_outbox
+            {
+                // Исходящие данные служб будят очередь приёма vsock.
+                outbox.set_waker(w.kicker(rustdroid_devices::vsock::RX_QUEUE));
             }
             if name == "net"
                 && let Some(wake) = &net_wake

@@ -489,6 +489,7 @@ name = "rustdroid-devices"
 version = "0.0.1"
 dependencies = [
  "crc32fast",
+ "rustdroid-guest-agent",
  "rustdroid-net",
  "rustdroid-virtio",
  "tracing",

@@ -13,6 +13,7 @@
 //!
 //! virtio-gpu вынесен в отдельный крейт `rustdroid-gpu`.
 
+pub mod agent;
 pub mod blk;
 pub mod cf_services;
 pub mod console;
@@ -32,4 +33,4 @@ pub use input::{InputEvent, InputEvents, InputKind, TouchState, VirtioInput};
 pub use net::{NatBackend, NetBackend, NetWake, VirtioNet};
 pub use rtc::CmosRtc;
 pub use serial::{InterruptLine, Serial16550};
-pub use vsock::VirtioVsock;
+pub use vsock::{VirtioVsock, VsockOutbox, VsockService};
