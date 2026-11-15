@@ -305,8 +305,11 @@ echo \"rustdroid: hb $n\"; if [ $((n % 4)) = 0 ]; then \
 
 /// Диагностика сети гостя при `--net user`: через 30 с после загрузки пишет в консоль строки
 /// `NETDIAG …` — адреса и маршруты, свойства сети, правила `eth0` в init Cuttlefish и пробное
-/// соединение с `1.1.1.1:80` в обход DNS (проверка маршрута и NAT).
-const NET_DIAG: &str = "(sleep 30; { echo '--- ip addr'; ip -o addr; echo '--- ip route'; ip route; \
+/// соединение с `1.1.1.1:80` в обход DNS (проверка маршрута и NAT). В начале — права оболочки
+/// консоли (`id`, `su 0 id`, режим SELinux, блочные устройства): от них зависит, как доставить
+/// в гость агента этапа 5.
+const NET_DIAG: &str = "(sleep 30; { echo '--- id'; id; su 0 id 2>&1 | head -2; getenforce; \
+ls -l /dev/block | head -12; echo '--- ip addr'; ip -o addr; echo '--- ip route'; ip route; \
 echo '--- props'; getprop | grep -E 'eth|dns|netd|net\\.'; echo '--- init rc'; \
 grep -n -B1 -A6 eth0 /vendor/etc/init/init.cutf_cvm.rc; echo '--- connect 1.1.1.1:80'; \
 printf 'GET / HTTP/1.0\\r\\n\\r\\n' | timeout 10 toybox nc -w 5 1.1.1.1 80 | head -3; \
