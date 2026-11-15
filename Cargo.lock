@@ -518,6 +518,9 @@ dependencies = [
 [[package]]
 name = "rustdroid-guest-agent"
 version = "0.0.1"
+dependencies = [
+ "libc",
+]
 
 [[package]]
 name = "rustdroid-hostinput"

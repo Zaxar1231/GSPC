@@ -17,6 +17,9 @@ path = "src/lib.rs"
 name = "rustdroid-agent"
 path = "src/main.rs"
 
+[target.'cfg(target_os = "linux")'.dependencies]
+libc = "0.2"
+
 [dependencies]
 
 [lints]
