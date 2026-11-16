@@ -122,6 +122,9 @@
 
 ### Fixed
 
+- Сеть гостя: init Cuttlefish переименовывал `eth0` в `buried_eth0` (служба `rename_eth0`), и Android
+  не видел сетевую карту (hw-test #24). При `--net user` shell гостя через `su 0` возвращает имя
+  `eth0` и поднимает интерфейс; строки `NETFIX` — в консоли.
 - ANGLE из vcpkg собирался без синхронизации контекстов с общими объектами
   (`ANGLE_ENABLE_SHARE_CONTEXT_LOCK`, `ANGLE_ENABLE_CONTEXT_MUTEX`), и `--gpu gfxstream-gl` падал
   в `libGLESv2.dll` через ~25 с после старта Android: gfxstream рисует из нескольких потоков.

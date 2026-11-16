@@ -303,6 +303,14 @@ echo rustdroid: guest setup done; n=0; while :; do sleep 5; n=$((n+1)); \
 echo \"rustdroid: hb $n\"; if [ $((n % 4)) = 0 ]; then \
 (s=$(screencap 2>/dev/null | md5sum | cut -c1-12); echo \"rustdroid: sc $n $s\") & fi; done) </dev/null &\n";
 
+/// Сеть гостя при `--net user`: init Cuttlefish прячет `eth0` службой `rename_eth0` (переименует
+/// в `buried_eth0`, чтобы Android не использовал карту). Shell гостя работает под root через
+/// `su 0` (SELinux в Permissive), поэтому возвращаем имя `eth0` и поднимаем интерфейс —
+/// тогда ConnectivityService запрашивает адрес по DHCP. Строки `NETFIX …` — в консоли.
+const NET_FIX: &str = "(i=0; while [ $i -lt 60 ]; do su 0 ip link show buried_eth0 >/dev/null 2>&1 && break; \
+sleep 1; i=$((i+1)); done; su 0 sh -c 'ip link set buried_eth0 down && ip link set buried_eth0 name eth0 \
+&& ip link set eth0 up' </dev/null 2>&1 | sed 's/^/NETFIX /'; echo 'NETFIX rc='$? ) &\n";
+
 /// Диагностика сети гостя при `--net user`: через 30 с после загрузки пишет в консоль строки
 /// `NETDIAG …` — адреса и маршруты, свойства сети, правила `eth0` в init Cuttlefish и пробное
 /// соединение с `1.1.1.1:80` в обход DNS (проверка маршрута и NAT). В начале — права оболочки
@@ -596,6 +604,7 @@ pub(crate) fn boot_android(args: &AndroidArgs) -> Result<()> {
             String::new()
         };
         if args.vm.net == NetMode::User {
+            script.push_str(NET_FIX);
             script.push_str(NET_DIAG);
         }
         if let Some(agent) = &agent_script {

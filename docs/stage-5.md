@@ -111,3 +111,11 @@ Init Cuttlefish (`init.cutf_cvm.rc`) при пустом `ro.vendor.disable_rena
 консоли говорят о результате. Предположения, которые надо проверить на железе: доступен
 `base64` (toybox) и разрешена запись в `/data/local/tmp`; путь через консоль медленный
 (бинарник ~730 КБ) и не переживает перезагрузку гостя.
+
+## Проверка на железе: hw-test #24 (i3-10110U, сборка b880f48)
+
+- virtio-net в госте есть, но `rename_eth0` переименовал `eth0` → `buried_eth0`; адреса нет,
+  маршрутов нет, `nc 1.1.1.1 80` — `Network is unreachable`, DHCP не запрашивался.
+- Shell консоли — `uid=2000(shell)`, но `su 0` даёт root, SELinux — Permissive.
+- Исправление: при `--net user` shell гостя возвращает имя `eth0` и поднимает интерфейс
+  (`NET_FIX` в `crates/app/src/console.rs`). Ждёт проверки на железе.
