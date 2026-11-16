@@ -37,3 +37,6 @@ minisign.key
 .DS_Store
 Thumbs.db
 desktop.ini
+
+# graphify: локальный граф проекта
+graphify-out/
