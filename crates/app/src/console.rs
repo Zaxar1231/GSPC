@@ -292,16 +292,16 @@ const GUEST_SETUP_DELAY: Duration = Duration::from_secs(20);
 /// настройка замирала на `svc`, top показывал остановленный процесс). Ввод команд — из
 /// `/dev/null`: `cmd`/`svc` подключают stdin к службе. Каждая команда — с тайм-аутом и строкой
 /// `rustdroid: setup rc=…` в логе консоли; маркер `guest setup done` — что настройка дошла до
-/// конца. Затем — пульс гостя `rustdroid: hb N` каждые 5 с и раз в 20 с хэш `screencap`
-/// (`rustdroid: sc N HASH`): меняется ли экран с точки зрения самого гостя (см. [`crate::pulse`]).
+/// конца. Затем — пульс гостя `rustdroid: hb N` каждые 5 с (см. [`crate::pulse`]). Хэш
+/// `screencap` раз в 20 с убран: снимок экрана гостя — полная композиция и чтение кадра, он сам
+/// давал рывки кадров (замирание, ради которого он был нужен, на hw-test #24 не повторилось).
 const ANDROID_WINDOW_SETUP: &str = "set +m; (while [ \"$(getprop sys.boot_completed)\" != 1 ]; do sleep 2; done; \
 for c in 'settings put system screen_off_timeout 2147483647' \
 'settings put global stay_on_while_plugged_in 7' 'svc power stayon true' \
 'locksettings set-disabled true' 'cmd uwb disable-uwb'; do \
 timeout 30 $c </dev/null >/dev/null 2>&1; echo \"rustdroid: setup rc=$? $c\"; done; \
 echo rustdroid: guest setup done; n=0; while :; do sleep 5; n=$((n+1)); \
-echo \"rustdroid: hb $n\"; if [ $((n % 4)) = 0 ]; then \
-(s=$(screencap 2>/dev/null | md5sum | cut -c1-12); echo \"rustdroid: sc $n $s\") & fi; done) </dev/null &\n";
+echo \"rustdroid: hb $n\"; done) </dev/null &\n";
 
 /// Сеть гостя при `--net user`: init Cuttlefish прячет `eth0` службой `rename_eth0` (переименует
 /// в `buried_eth0`, чтобы Android не использовал карту). Shell гостя работает под root через
