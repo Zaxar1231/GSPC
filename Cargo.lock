@@ -467,9 +467,11 @@ dependencies = [
  "anyhow",
  "clap",
  "rustdroid-devices",
+ "rustdroid-gfxstream",
  "rustdroid-gpu",
  "rustdroid-input",
  "rustdroid-instance",
+ "rustdroid-net",
  "rustdroid-present",
  "rustdroid-vmm",
  "rustdroid-whpx",
@@ -487,6 +489,8 @@ name = "rustdroid-devices"
 version = "0.0.1"
 dependencies = [
  "crc32fast",
+ "rustdroid-guest-agent",
+ "rustdroid-net",
  "rustdroid-virtio",
  "tracing",
  "vm-superio",
@@ -505,13 +509,18 @@ dependencies = [
 name = "rustdroid-gpu"
 version = "0.0.1"
 dependencies = [
+ "rustdroid-gfxstream",
  "rustdroid-virtio",
+ "thiserror",
  "tracing",
 ]
 
 [[package]]
 name = "rustdroid-guest-agent"
 version = "0.0.1"
+dependencies = [
+ "libc",
+]
 
 [[package]]
 name = "rustdroid-hostinput"
@@ -529,6 +538,13 @@ name = "rustdroid-instance"
 version = "0.0.1"
 dependencies = [
  "thiserror",
+]
+
+[[package]]
+name = "rustdroid-net"
+version = "0.0.1"
+dependencies = [
+ "tracing",
 ]
 
 [[package]]

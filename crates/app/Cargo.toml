@@ -23,8 +23,10 @@ tracing-subscriber.workspace = true
 
 [target.'cfg(windows)'.dependencies]
 rustdroid-devices.workspace = true
+rustdroid-gfxstream.workspace = true
 rustdroid-gpu.workspace = true
 rustdroid-input.workspace = true
+rustdroid-net.workspace = true
 rustdroid-present.workspace = true
 rustdroid-instance.workspace = true
 rustdroid-vmm.workspace = true
@@ -32,7 +34,12 @@ rustdroid-whpx.workspace = true
 windows = { workspace = true, features = [
     "Wdk_System_SystemServices",
     "Win32_Foundation",
+    "Win32_NetworkManagement_IpHelper",
+    "Win32_Networking_WinSock",
     "Win32_System_Console",
+    "Win32_System_Diagnostics_Debug",
+    "Win32_System_Kernel",
+    "Win32_System_LibraryLoader",
     "Win32_System_SystemInformation",
     "Win32_System_Threading",
 ] }

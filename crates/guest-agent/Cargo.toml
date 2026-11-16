@@ -9,9 +9,16 @@ repository.workspace = true
 authors.workspace = true
 publish.workspace = true
 
+[lib]
+name = "rustdroid_agent"
+path = "src/lib.rs"
+
 [[bin]]
 name = "rustdroid-agent"
 path = "src/main.rs"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+libc = "0.2"
 
 [dependencies]
 

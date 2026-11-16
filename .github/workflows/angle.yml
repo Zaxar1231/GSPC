@@ -1,0 +1,109 @@
+name: angle
+
+# Сборка ANGLE (libEGL.dll + libGLESv2.dll, бэкенд Direct3D 11) под Windows через порт vcpkg из
+# зафиксированного коммита microsoft/vcpkg. Нужна уровню графики 2 (этап 4.6): gfxstream рисует
+# через EGL/GLES ANGLE, а ANGLE — через D3D11, поэтому работают видеокарты без Vulkan
+# (Intel HD 2500 и подобные). Результат публикуется в pre-release `deps-angle`; hw-test.ps1 и
+# сборки кладут DLL рядом с rustdroid.exe. Версия меняется только здесь, в VCPKG_COMMIT.
+
+on:
+  push:
+    paths: [".github/workflows/angle.yml", "third_party/vcpkg-triplets/**"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: angle
+  cancel-in-progress: false
+
+env:
+  VCPKG_REPO: https://github.com/microsoft/vcpkg
+  # Порт angle: version-string chromium_7258, port-version 2.
+  VCPKG_COMMIT: 8f363bdc11359ede4bc51e5eb32a2617538049c8
+
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 150
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: rustdroid
+          sparse-checkout: third_party/vcpkg-triplets
+
+      - name: vcpkg
+        shell: pwsh
+        run: |
+          git init vcpkg
+          git -C vcpkg remote add origin $env:VCPKG_REPO
+          git -C vcpkg fetch --depth 1 origin $env:VCPKG_COMMIT
+          git -C vcpkg checkout --quiet FETCH_HEAD
+          git -C vcpkg log -1 --format='%H %cd %s'
+          ./vcpkg/bootstrap-vcpkg.bat -disableMetrics
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Сборка ANGLE (x64-windows-release-angle)
+        shell: pwsh
+        run: |
+          # Свой triplet: только release и блокировка общих контекстов ANGLE (см. файл triplet).
+          ./vcpkg/vcpkg.exe install angle:x64-windows-release-angle --clean-after-build `
+            --overlay-triplets=rustdroid/third_party/vcpkg-triplets
+          if ($LASTEXITCODE -ne 0) {
+            Get-ChildItem vcpkg/buildtrees/angle -Filter *.log -ErrorAction SilentlyContinue |
+              ForEach-Object { "==== $($_.Name)"; Get-Content $_.FullName -Tail 60 }
+            exit $LASTEXITCODE
+          }
+
+      - name: Упаковка
+        shell: pwsh
+        run: |
+          $root = 'vcpkg/installed/x64-windows-release-angle'
+          $out = Join-Path $env:RUNNER_TEMP 'angle'
+          New-Item -ItemType Directory -Force -Path $out | Out-Null
+          foreach ($name in 'libEGL.dll', 'libGLESv2.dll') {
+            $f = Join-Path $root "bin/$name"
+            if (-not (Test-Path $f)) { Write-Error "$name не найдена"; exit 1 }
+            Copy-Item $f $out
+          }
+          # Рантайм, от которого зависят DLL (zlib), — рядом.
+          Get-ChildItem (Join-Path $root 'bin') -Filter *.dll |
+            Where-Object { $_.Name -notin 'libEGL.dll', 'libGLESv2.dll' } |
+            ForEach-Object { Copy-Item $_.FullName $out }
+          Copy-Item (Join-Path $root 'share/angle/copyright') (Join-Path $out 'angle-LICENSE.txt')
+          $ver = (Get-Content vcpkg/ports/angle/vcpkg.json -Raw | ConvertFrom-Json).'version-string'
+          Set-Content (Join-Path $out 'angle-version.txt') "$ver (vcpkg $env:VCPKG_COMMIT)" -NoNewline
+          $lines = Get-ChildItem $out -Filter *.dll | Sort-Object Name | ForEach-Object {
+            "$((Get-FileHash -Algorithm SHA256 $_.FullName).Hash.ToLower())  $($_.Name)"
+          }
+          Set-Content (Join-Path $out 'angle.sha256') $lines
+          Get-Content (Join-Path $out 'angle.sha256')
+          Compress-Archive -Path (Join-Path $out '*') -DestinationPath (Join-Path $env:RUNNER_TEMP 'angle-windows-x64.zip')
+          # Символы отдельным архивом: для разбора падений внутри ANGLE.
+          $pdbs = Get-ChildItem (Join-Path $root 'bin') -Filter *.pdb
+          if ($pdbs) {
+            Compress-Archive -Path $pdbs.FullName -DestinationPath (Join-Path $env:RUNNER_TEMP 'angle-windows-x64-pdb.zip')
+          } else {
+            Write-Warning 'PDB ANGLE не найдены'
+          }
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: angle-windows-x64
+          path: ${{ runner.temp }}/angle-windows-x64*.zip
+
+      - name: Публикация в pre-release deps-angle
+        if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/feat/')
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          $tag = 'deps-angle'
+          gh release delete $tag --cleanup-tag --yes 2>$null
+          $global:LASTEXITCODE = 0
+          gh release create $tag --prerelease --target '${{ github.sha }}' --title 'ANGLE (Windows x64, D3D11)' `
+            --notes "libEGL.dll и libGLESv2.dll ANGLE из порта vcpkg (microsoft/vcpkg@$env:VCPKG_COMMIT, BSD-3-Clause)." `
+            (Get-ChildItem $env:RUNNER_TEMP -Filter 'angle-windows-x64*.zip').FullName
+          if ($LASTEXITCODE -ne 0) { exit 1 }

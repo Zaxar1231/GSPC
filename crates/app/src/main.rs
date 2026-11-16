@@ -9,13 +9,22 @@
 //! С `--display` открывается окно с экраном гостя (virtio-gpu 2D, D3D12) и вводом мышью и
 //! клавиатурой. UI в стиле Material Design 3 — на этапе 4.
 
+mod agent_push;
 mod cli;
 #[cfg(windows)]
 mod console;
 #[cfg(windows)]
+mod crash;
+#[cfg(windows)]
 mod display;
 #[cfg(windows)]
+mod gpu_probe;
+#[cfg(windows)]
+mod hostnet;
+#[cfg(windows)]
 mod preflight;
+#[cfg_attr(not(windows), allow(dead_code))]
+mod pulse;
 
 use anyhow::Result;
 use clap::Parser;
@@ -40,8 +49,10 @@ pub static AmdPowerXpressRequestHighPerformance: i32 = 1;
 fn main() -> Result<()> {
     let cli = Cli::parse();
     init_tracing(cli.verbose);
+    #[cfg(windows)]
+    crash::install();
     tracing::debug!(version = env!("CARGO_PKG_VERSION"), "RustDroid запускается");
-    run(cli.command.unwrap_or(Command::Check))
+    run(cli.command.unwrap_or(Command::Check), cli.verbose)
 }
 
 fn init_tracing(verbose: u8) {
@@ -61,15 +72,16 @@ fn init_tracing(verbose: u8) {
 }
 
 #[cfg(windows)]
-fn run(command: Command) -> Result<()> {
+fn run(command: Command, verbose: u8) -> Result<()> {
     match command {
-        Command::Check => preflight::run(),
+        Command::Check => preflight::run(verbose),
+        Command::GpuProbe { gl } => gpu_probe::run(gl),
         Command::Boot(args) => console::boot(&args),
         Command::BootAndroid(args) => console::boot_android(&args),
     }
 }
 
 #[cfg(not(windows))]
-fn run(_command: Command) -> Result<()> {
+fn run(_command: Command, _verbose: u8) -> Result<()> {
     anyhow::bail!("RustDroid поддерживает только Windows 11 x64")
 }

@@ -9,8 +9,14 @@ use rustdroid_telemetry::FrameStats;
 use rustdroid_telemetry::overlay::OverlayData;
 
 use crate::d3d12::{PresentMode, Presenter};
-use crate::usage::{GuestRuntime, UsageMeter};
+use crate::usage::{GuestRuntime, ThreadMeter, UsageMeter};
 use crate::window::WindowHandle;
+
+/// Пауза между кадрами, после которой экран считается неподвижным: Android не присылает кадры,
+/// пока ничего не меняется, и такая пауза — не медленный кадр. В статистику она не идёт.
+const IDLE_GAP: Duration = Duration::from_secs(1);
+/// Как часто писать в лог кадры и профиль CPU.
+const LOG_EVERY: Duration = Duration::from_secs(10);
 
 /// Настройки вывода.
 #[derive(Debug, Clone, Copy)]
@@ -63,6 +69,10 @@ pub fn run(
     let mut meter = UsageMeter::new(guest);
     let mut usage = meter.update();
     let mut last_usage = Instant::now();
+    let mut threads = ThreadMeter::new();
+    let _ = threads.update();
+    let mut idle_gaps = 0_u32;
+    let mut frames = 0_u32;
     let mut overlay = OverlayData {
         lines: Vec::with_capacity(6),
         frame_times_ms: Vec::with_capacity(256),
@@ -71,17 +81,39 @@ pub fn run(
 
     while !stop.load(Ordering::Acquire) {
         presenter.wait_for_slot(100);
+        if last_usage.elapsed() >= Duration::from_secs(1) {
+            last_usage = Instant::now();
+            usage = meter.update();
+        }
+        if last_log.elapsed() >= LOG_EVERY {
+            last_log = Instant::now();
+            log_periodic(
+                &mut stats,
+                &mut latency,
+                &usage,
+                &mut threads,
+                frames,
+                idle_gaps,
+            );
+            idle_gaps = 0;
+            frames = 0;
+        }
         let Some(frame) = mailbox.wait_after(seen, Duration::from_millis(100)) else {
             continue;
         };
         seen = frame.seq;
+        frames += 1;
         if let Some(prev) = last_flush {
             let dt = frame.flushed_at.saturating_duration_since(prev);
-            stats.record(dt);
-            if times.len() == times.capacity() {
-                times.remove(0);
+            if dt >= IDLE_GAP {
+                idle_gaps += 1;
+            } else {
+                stats.record(dt);
+                if times.len() == times.capacity() {
+                    times.remove(0);
+                }
+                times.push(dt.as_secs_f32() * 1000.0);
             }
-            times.push(dt.as_secs_f32() * 1000.0);
         }
         last_flush = Some(frame.flushed_at);
 
@@ -92,11 +124,6 @@ pub fn run(
             }
             next_deadline =
                 next_deadline.max(now) + Duration::from_secs_f64(1.0 / f64::from(cfg.fps_limit));
-        }
-
-        if last_usage.elapsed() >= Duration::from_secs(1) {
-            last_usage = Instant::now();
-            usage = meter.update();
         }
 
         let overlay_ref = if cfg.overlay {
@@ -125,25 +152,44 @@ pub fn run(
         // Задержка от RESOURCE_FLUSH гостя до Present.
         latency.record(frame.flushed_at.elapsed());
         mailbox.recycle(frame);
-
-        if last_log.elapsed() >= Duration::from_secs(10) {
-            last_log = Instant::now();
-            if let (Some(s), Some(l)) = (stats.summary(), latency.summary()) {
-                tracing::info!(
-                    fps = format_args!("{:.1}", s.avg_fps),
-                    low_1 = format_args!("{:.1}", s.low_1_percent_fps),
-                    frame_ms = format_args!("{:.2}", s.avg_frame_ms),
-                    p99_ms = format_args!("{:.2}", s.p99_frame_ms),
-                    flush_to_present_ms = format_args!("{:.2}", l.avg_frame_ms),
-                    ram_gib = format_args!("{:.2}", usage.working_set_gib),
-                    vcpu_pct = format_args!("{:.0}", usage.guest_cpu.unwrap_or(-1.0)),
-                    cpu_pct = format_args!("{:.0}", usage.process_cpu),
-                    system_cpu_pct = format_args!("{:.0}", usage.system_cpu),
-                    "кадры гостя"
-                );
-            }
-        }
     }
+}
+
+/// Строки лога раз в [`LOG_EVERY`]: кадры (если за интервал они были; статистика — по
+/// скользящему окну последних кадров) и загрузка CPU по группам потоков.
+fn log_periodic(
+    stats: &mut FrameStats,
+    latency: &mut FrameStats,
+    usage: &rustdroid_telemetry::usage::Usage,
+    threads: &mut ThreadMeter,
+    frames: u32,
+    idle_gaps: u32,
+) {
+    if frames > 0
+        && let (Some(s), Some(l)) = (stats.summary(), latency.summary())
+    {
+        tracing::info!(
+            frames,
+            fps = format_args!("{:.1}", s.avg_fps),
+            low_1 = format_args!("{:.1}", s.low_1_percent_fps),
+            frame_ms = format_args!("{:.2}", s.avg_frame_ms),
+            p99_ms = format_args!("{:.2}", s.p99_frame_ms),
+            flush_to_present_ms = format_args!("{:.2}", l.avg_frame_ms),
+            idle_gaps,
+            ram_gib = format_args!("{:.2}", usage.working_set_gib),
+            vcpu_pct = format_args!("{:.0}", usage.guest_cpu.unwrap_or(-1.0)),
+            cpu_pct = format_args!("{:.0}", usage.process_cpu),
+            system_cpu_pct = format_args!("{:.0}", usage.system_cpu),
+            "кадры гостя"
+        );
+    }
+    let loads = threads.update();
+    tracing::info!(
+        vcpu_pct = format_args!("{:.0}", usage.guest_cpu.unwrap_or(-1.0)),
+        cpu_pct = format_args!("{:.0}", usage.process_cpu),
+        threads = %rustdroid_telemetry::threads::format_loads(&loads),
+        "профиль CPU"
+    );
 }
 
 fn wait_first(mailbox: &Mailbox, stop: &AtomicBool) -> Option<Arc<rustdroid_gpu::Frame>> {

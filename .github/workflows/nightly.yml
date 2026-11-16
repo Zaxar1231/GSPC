@@ -39,6 +39,8 @@ jobs:
           $dir = Join-Path $env:RUNNER_TEMP 'nightly'
           New-Item -ItemType Directory -Force -Path $dir | Out-Null
           Copy-Item target/release/rustdroid.exe $dir
+          # Символы: по ним разбираются отчёты о падениях (адреса rustdroid.exe+0x…).
+          Compress-Archive -Path target/release/rustdroid.pdb -DestinationPath (Join-Path $dir 'rustdroid-pdb.zip')
           $hash = (Get-FileHash -Algorithm SHA256 (Join-Path $dir 'rustdroid.exe')).Hash.ToLower()
           Set-Content -Path (Join-Path $dir 'rustdroid.exe.sha256') -Value $hash -NoNewline
           Set-Content -Path (Join-Path $dir 'commit.txt') -Value '${{ github.sha }}' -NoNewline
@@ -47,6 +49,7 @@ jobs:
           $global:LASTEXITCODE = 0
           $notes = "Сборка для проверки на железе (scripts/hw-test.ps1), коммит ${{ github.sha }}. Не релиз."
           gh release create $tag --prerelease --target '${{ github.sha }}' --title $tag --notes $notes `
-            (Join-Path $dir 'rustdroid.exe') (Join-Path $dir 'rustdroid.exe.sha256') (Join-Path $dir 'commit.txt')
+            (Join-Path $dir 'rustdroid.exe') (Join-Path $dir 'rustdroid.exe.sha256') (Join-Path $dir 'commit.txt') `
+            (Join-Path $dir 'rustdroid-pdb.zip')
           if ($LASTEXITCODE -ne 0) { exit 1 }
           "Опубликовано: $tag, sha256 $hash"

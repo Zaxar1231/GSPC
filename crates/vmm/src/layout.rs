@@ -16,7 +16,11 @@
 //!   0xE000_0000               ECAM (конфигурационное пространство PCI, шина 0)
 //!   0xFEC0_0000 IOAPIC, 0xFEE0_0000 LAPIC
 //! 0x1_0000_0000 остаток RAM
+//! 0x8_0000_0000 окно 64-битных BAR PCI (32..40 ГиБ): общая память устройств (virtio-gpu)
 //! ```
+//!
+//! Окно 64-битных BAR лежит ниже 64 ГиБ: у старых CPU (Ivy Bridge, i3-3220) физический адрес
+//! 36-битный.
 
 /// GDT.
 pub const GDT_ADDR: u64 = 0x500;
@@ -52,6 +56,13 @@ pub const MMIO_HOLE_END: u64 = 0x1_0000_0000;
 pub const PCI_MMIO_START: u64 = 0xC000_0000;
 /// Конец окна BAR (не включительно).
 pub const PCI_MMIO_END: u64 = 0xE000_0000;
+/// Начало окна 64-битных BAR (32 ГиБ).
+pub const PCI_MMIO64_START: u64 = 0x8_0000_0000;
+/// Конец окна 64-битных BAR (40 ГиБ, не включительно).
+pub const PCI_MMIO64_END: u64 = 0xA_0000_0000;
+/// Наибольший объём RAM гостя: её верхняя часть не должна заходить в окно 64-битных BAR.
+pub const MAX_RAM: u64 = PCI_MMIO64_START - (MMIO_HOLE_END - MMIO_HOLE_START);
+
 /// База ECAM.
 pub const ECAM_ADDR: u64 = 0xE000_0000;
 /// Размер ECAM для шины 0 (32 устройства × 8 функций × 4 КиБ).

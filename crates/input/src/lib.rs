@@ -9,5 +9,6 @@
 
 pub mod geometry;
 pub mod keys;
+pub mod wheel;
 
 pub use geometry::{NormPoint, PanelSize, Rotation, TouchPoint};

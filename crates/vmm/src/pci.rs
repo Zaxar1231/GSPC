@@ -9,7 +9,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 use rustdroid_virtio::VirtioPci;
 use rustdroid_virtio::pci::BAR_SIZE;
 
-use crate::layout::{ECAM_SIZE, PCI_MMIO_END, PCI_MMIO_START};
+use crate::layout::{ECAM_SIZE, PCI_MMIO_END, PCI_MMIO_START, PCI_MMIO64_END, PCI_MMIO64_START};
 
 /// Функция PCI, разделяемая между vCPU (config/MMIO) и worker-потоком устройства.
 pub type SharedFunction = Arc<Mutex<VirtioPci>>;
@@ -25,6 +25,7 @@ struct Slot {
 pub struct PciBus {
     slots: Vec<Slot>,
     next_bar: u64,
+    next_bar64: u64,
 }
 
 impl Default for PciBus {
@@ -40,6 +41,7 @@ impl PciBus {
         Self {
             slots: Vec::new(),
             next_bar: PCI_MMIO_START,
+            next_bar64: PCI_MMIO64_START,
         }
     }
 
@@ -51,6 +53,20 @@ impl PciBus {
         }
         self.next_bar = addr + BAR_SIZE;
         u32::try_from(addr).ok()
+    }
+
+    /// Адрес 64-битного BAR размера `size` (степень двойки) в окне выше RAM; `None`, если окно
+    /// исчерпано.
+    pub fn allocate_bar64(&mut self, size: u64) -> Option<u64> {
+        if !size.is_power_of_two() {
+            return None;
+        }
+        let addr = self.next_bar64.div_ceil(size) * size;
+        if addr.checked_add(size)? > PCI_MMIO64_END {
+            return None;
+        }
+        self.next_bar64 = addr + size;
+        Some(addr)
     }
 
     /// Добавляет функцию; возвращает номер устройства (слоты 1..31, 0 — свободен).
@@ -198,6 +214,19 @@ mod tests {
         bus.ecam_write((1 << 15) | 0x10, &0xD000_0000_u32.to_le_bytes());
         assert!(bus.bar_lookup(PCI_MMIO_START).is_none());
         assert!(bus.bar_lookup(0xD000_0010).is_some());
+    }
+
+    #[test]
+    fn bar64_allocation_is_aligned_and_bounded() {
+        let mut bus = PciBus::new();
+        assert_eq!(bus.allocate_bar64(4 << 30), Some(PCI_MMIO64_START));
+        assert_eq!(
+            bus.allocate_bar64(1 << 20),
+            Some(PCI_MMIO64_START + (4 << 30))
+        );
+        // Следующий 4 ГиБ выравнивается и уже не помещается в окно 8 ГиБ.
+        assert_eq!(bus.allocate_bar64(4 << 30), None);
+        assert_eq!(bus.allocate_bar64(3 << 20), None);
     }
 
     #[test]

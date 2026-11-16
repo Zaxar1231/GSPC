@@ -109,24 +109,25 @@ impl Drop for ThreadTuning {
     }
 }
 
-/// Настраивает текущий поток: MMCSS-задача (`"Games"`, `"Pro Audio"`) и, на гибридных CPU,
-/// привязка к производительным ядрам. Ошибки не фатальны и только пишутся в лог.
+/// Настраивает текущий поток: MMCSS-задача (`"Games"`, `"Pro Audio"`; `None` — без MMCSS) и, на
+/// гибридных CPU, привязка к производительным ядрам. Ошибки не фатальны и только пишутся в лог.
+///
+/// vCPU-потокам MMCSS не даётся: гость, ожидающий ответа gfxstream, крутится на vCPU, и
+/// поднятый приоритет vCPU отнимает процессор у потоков gfxstream и драйвера видеокарты.
 #[must_use]
-pub fn tune_current_thread(mmcss_task: &str) -> ThreadTuning {
-    let task: Vec<u16> = mmcss_task
-        .encode_utf16()
-        .chain(std::iter::once(0))
-        .collect();
-    let mut index = 0_u32;
-    // SAFETY: имя задачи — нуль-терминированная UTF-16 строка, живущая до конца вызова.
-    let mmcss =
+pub fn tune_current_thread(mmcss_task: Option<&str>) -> ThreadTuning {
+    let mmcss = mmcss_task.and_then(|name| {
+        let task: Vec<u16> = name.encode_utf16().chain(std::iter::once(0)).collect();
+        let mut index = 0_u32;
+        // SAFETY: имя задачи — нуль-терминированная UTF-16 строка, живущая до конца вызова.
         match unsafe { AvSetMmThreadCharacteristicsW(PCWSTR(task.as_ptr()), &raw mut index) } {
             Ok(h) => Some(h),
             Err(e) => {
-                tracing::warn!(task = mmcss_task, error = %e, "MMCSS недоступен");
+                tracing::warn!(task = name, error = %e, "MMCSS недоступен");
                 None
             }
-        };
+        }
+    });
 
     let perf = performance_cpu_sets();
     let mut pinned = 0;
@@ -141,7 +142,7 @@ pub fn tune_current_thread(mmcss_task: &str) -> ThreadTuning {
             tracing::warn!("не удалось привязать поток к производительным ядрам");
         }
     }
-    tracing::debug!(task = mmcss_task, pinned, "поток настроен");
+    tracing::debug!(task = ?mmcss_task, pinned, "поток настроен");
     ThreadTuning { mmcss, pinned }
 }
 

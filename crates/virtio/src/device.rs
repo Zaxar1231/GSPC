@@ -3,6 +3,8 @@
 use crate::mem::GuestMemory;
 use crate::queue::{Queue, QueueError};
 
+/// Тип устройства virtio-net.
+pub const TYPE_NET: u32 = 1;
 /// Тип устройства virtio-blk.
 pub const TYPE_BLOCK: u32 = 2;
 /// Тип устройства virtio-console.
@@ -37,6 +39,13 @@ pub trait VirtioDevice: Send {
 
     /// Запись конфигурации устройства.
     fn write_config(&mut self, _offset: u64, _data: &[u8]) {}
+
+    /// Область общей памяти устройства (virtio 1.2, 4.1.4.7): номер области (`shmid`) и размер
+    /// (степень двойки). Транспорт отдаёт её гостю 64-битным BAR2; что и когда в ней
+    /// отображено, решает устройство. Только одна область на устройство.
+    fn shared_memory_region(&self) -> Option<(u8, u64)> {
+        None
+    }
 
     /// Драйвер выставил DRIVER_OK с согласованными возможностями.
     fn activate(&mut self, _features: u64) {}

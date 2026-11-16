@@ -10,7 +10,8 @@
       3. скачивает образы Cuttlefish x86_64 (один раз, дальше берёт из кэша);
       4. этап 3: Android в окне — нужно ваше участие (тап, свайп, клавиатура); когда Android
          загрузится, скрипт подаст звук; скриншоты окна делаются автоматически;
-      5. собирает всё в архив на рабочем столе.
+      5. собирает всё в архив на рабочем столе и, если есть GitHub CLI (gh), отправляет отчёт
+         в issue (архив — в pre-release hw-reports).
 
     С -FromSource — как раньше: ставит Git, Rust и Build Tools, собирает из исходников и может
     прогнать этапы 1–2 (-Stages 1,2,3).
@@ -27,6 +28,31 @@
 
 .PARAMETER FromSource
     Собрать из исходников вместо готового rustdroid.exe.
+
+.PARAMETER Cpus
+    Число vCPU гостя; 0 (по умолчанию) — rustdroid подберёт сам, оставив часть ядер хосту.
+
+.PARAMETER Gpu
+    Графика этапа 3: auto (по умолчанию: gfxstream на Vulkan, если он прошёл проверку 3D, иначе
+    gfxstream-gl на ANGLE/Direct3D 11, иначе software), gfxstream, gfxstream-gl или software.
+
+.PARAMETER CheckOnly
+    Только проверка системы и 3D (Vulkan, gfxstream) — без образов и запуска Android, ~1 мин.
+
+.PARAMETER Append
+    Дополнительные параметры командной строки ядра гостя (этап 3), например "idle=poll".
+
+.PARAMETER NoUpload
+    Не отправлять отчёт на GitHub. По умолчанию, если установлен и авторизован GitHub CLI (gh),
+    архив загружается в pre-release hw-reports, а итог — в новое issue.
+
+.PARAMETER NoNet
+    Этап 3 без сетевой карты (по умолчанию у гостя virtio-net с NAT в пользовательском режиме,
+    --net user). В отчёт попадает диагностика сети гостя (stage3-net.txt).
+
+.PARAMETER KeepInstance
+    Этап 3 без сброса инстанса: повторный запуск Android с сохранёнными данными и кэшами
+    шейдеров (проверка статтеров при повторном запуске). По умолчанию инстанс сбрасывается.
 #>
 [CmdletBinding()]
 param(
@@ -34,7 +60,7 @@ param(
     [string]$Branch = 'main',
     [string]$RepoDir = '',
     [int]$Memory = 4096,
-    [int]$Cpus = 4,
+    [int]$Cpus = 0,
     [string]$Display = '1280x720@60',
     [int]$Stage1Seconds = 30,
     [int]$Stage2Seconds = 300,
@@ -43,6 +69,13 @@ param(
     [string]$KernelBuild = 'latest',
     [switch]$SkipBuild,
     [switch]$FromSource,
+    [switch]$CheckOnly,
+    [switch]$KeepInstance,
+    [switch]$NoUpload,
+    [switch]$NoNet,
+    [string]$Append = '',
+    [ValidateSet('auto', 'gfxstream', 'gfxstream-gl', 'software')]
+    [string]$Gpu = 'auto',
     [switch]$Yes
 )
 
@@ -55,6 +88,9 @@ try {
 } catch { }
 
 $RepoUrl = 'https://github.com/Zaxar1231/GSPC.git'
+if ($CheckOnly) { $Stages = @() }
+$script:GfxstreamOk = $false
+$script:GfxstreamGlOk = $false
 $Stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
 $Desktop = [Environment]::GetFolderPath('Desktop')
 if (-not $Desktop) { $Desktop = $HOME }
@@ -111,11 +147,12 @@ function Run-Logged([string]$File, [string[]]$Arguments, [string]$Log) {
 }
 
 # Запуск rustdroid без консольного ввода: stdout/stderr в файлы, страховочный таймаут.
-function Run-Vm([string]$Name, [string[]]$Arguments, [int]$Seconds, [scriptblock]$WhileRunning) {
+# $GuestInput уходит в консоль гостя (hvc0, там shell Android).
+function Run-Vm([string]$Name, [string[]]$Arguments, [int]$Seconds, [scriptblock]$WhileRunning, [string]$GuestInput = '') {
     $stdout = Join-Path $Out "$Name-stdout.log"
     $stderr = Join-Path $Out "$Name-stderr.log"
     $stdin = Join-Path $Out '.empty-stdin'
-    Set-Content -Path $stdin -Value '' -NoNewline
+    Set-Content -Path $stdin -Value $GuestInput -NoNewline
     Say "  > rustdroid $($Arguments -join ' ')" 'DarkGray'
     # Start-Process в Windows PowerShell склеивает аргументы без кавычек: пути с пробелами
     # нужно экранировать самим.
@@ -231,6 +268,21 @@ New-Item -ItemType Directory -Force -Path $Work | Out-Null
 function Download([string]$Url, [string]$Dest) {
     [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
     Invoke-WebRequest -Uri $Url -OutFile $Dest -UseBasicParsing
+}
+
+# Большие файлы: curl.exe из Windows 10/11 с индикатором, повторами и докачкой после обрыва
+# (Invoke-WebRequest молчит до конца и начинает заново при каждом сбое).
+function Download-Large([string]$Url, [string]$Dest) {
+    $curl = Join-Path $env:SystemRoot 'System32\curl.exe'
+    if (-not (Test-Path $curl)) { Download $Url $Dest; return }
+    for ($attempt = 1; $attempt -le 5; $attempt++) {
+        & $curl -L --fail --retry 5 --retry-delay 5 --connect-timeout 30 --speed-limit 10000 --speed-time 60 `
+            -C - --progress-bar -o $Dest $Url
+        if ($LASTEXITCODE -eq 0) { return }
+        Warn "скачивание прервалось (curl, код $LASTEXITCODE), попытка $attempt из 5 — продолжаю с места обрыва"
+        Start-Sleep -Seconds 5
+    }
+    throw "не удалось скачать $Url (curl, код $LASTEXITCODE). Проверьте доступ к ci.android.com и storage.googleapis.com"
 }
 
 if ($FromSource) {
@@ -377,10 +429,63 @@ if ($FromSource) {
     Set-Location $Work
 }
 
+# gfxstream (3D на видеокарте): DLL из pre-release deps-gfxstream кладётся рядом с rustdroid.exe.
+if (Test-Path $Exe) {
+    Step 'gfxstream (3D)'
+    $zip = Join-Path $Work 'gfxstream-windows-x64.zip'
+    $unpacked = Join-Path $Work 'gfxstream'
+    try {
+        Download "https://github.com/$Owner/$RepoName/releases/download/deps-gfxstream/gfxstream-windows-x64.zip" $zip
+        if (Test-Path $unpacked) { Remove-Item $unpacked -Recurse -Force }
+        Expand-Archive -Path $zip -DestinationPath $unpacked -Force
+        $dll = Join-Path $unpacked 'gfxstream_backend.dll'
+        $want = (Get-Content (Join-Path $unpacked 'gfxstream_backend.dll.sha256') -Raw).Trim().ToLower()
+        $have = (Get-FileHash -Algorithm SHA256 $dll).Hash.ToLower()
+        if ($have -ne $want) { throw "sha256 не совпал: $have" }
+        Copy-Item $dll (Split-Path -Parent $Exe) -Force
+        $gfxCommit = (Get-Content (Join-Path $unpacked 'gfxstream-commit.txt') -Raw).Trim()
+        Ok "gfxstream_backend.dll (google/gfxstream $($gfxCommit.Substring(0, 7)))"
+        "gfxstream: $gfxCommit, sha256 $have" | Add-Content -Path (Join-Path $Out 'system.txt') -Encoding UTF8
+    } catch {
+        Warn "Не удалось скачать gfxstream ($_): проверка 3D покажет, что DLL нет"
+    }
+    # ANGLE (libEGL/libGLESv2 на Direct3D 11) — уровень графики 2 для видеокарт без Vulkan.
+    $zip = Join-Path $Work 'angle-windows-x64.zip'
+    $unpacked = Join-Path $Work 'angle'
+    try {
+        Download "https://github.com/$Owner/$RepoName/releases/download/deps-angle/angle-windows-x64.zip" $zip
+        if (Test-Path $unpacked) { Remove-Item $unpacked -Recurse -Force }
+        Expand-Archive -Path $zip -DestinationPath $unpacked -Force
+        foreach ($line in Get-Content (Join-Path $unpacked 'angle.sha256')) {
+            $want, $name = $line -split '\s+', 2
+            if (-not $name) { continue }
+            $f = Join-Path $unpacked $name
+            $have = (Get-FileHash -Algorithm SHA256 $f).Hash.ToLower()
+            if ($have -ne $want.ToLower()) { throw "sha256 $name не совпал: $have" }
+            Copy-Item $f (Split-Path -Parent $Exe) -Force
+        }
+        $angleVer = (Get-Content (Join-Path $unpacked 'angle-version.txt') -Raw).Trim()
+        Ok "ANGLE: libEGL.dll, libGLESv2.dll ($angleVer)"
+        "angle: $angleVer" | Add-Content -Path (Join-Path $Out 'system.txt') -Encoding UTF8
+    } catch {
+        Warn "Не удалось скачать ANGLE ($_): уровень графики 2 (без Vulkan) будет недоступен"
+    }
+}
+
 if (Test-Path $Exe) {
     Step 'rustdroid check'
-    $rc = Run-Logged $Exe @('check') (Join-Path $Out 'check.log')
+    # -v: в check.log попадают сообщения драйвера Vulkan и gfxstream.
+    $checkLog = Join-Path $Out 'check.log'
+    $rc = Run-Logged $Exe @('-v', 'check') $checkLog
     if ($rc -eq 0) { Ok 'rustdroid check: система готова' } else { Fail "rustdroid check: код $rc (check.log)" }
+    # Итог по 3D — отдельными строками в summary.txt.
+    $script:GfxstreamOk = [bool](Select-String -Path $checkLog -Pattern 'gfxstream: инициализирован' -SimpleMatch -Quiet)
+    $script:GfxstreamGlOk = [bool](Select-String -Path $checkLog -Pattern 'gfxstream GL: инициализирован' -SimpleMatch -Quiet)
+    foreach ($m in Select-String -Path $checkLog -Pattern '\[( OK |WARN)\] (.*)$') {
+        $text = $m.Matches[0].Groups[2].Value -replace "$([char]27)\[[0-9;]*m", ''
+        if ($text -notmatch '^(Vulkan|gfxstream|проверка 3D)') { continue }
+        if ($m.Matches[0].Groups[1].Value -eq ' OK ') { Ok $text } else { Warn $text }
+    }
 }
 
 # ------------------------------------------------------------ гость ---
@@ -427,8 +532,8 @@ function Fetch-Images {
     $dir = Join-Path $Work "cf-$id"
     New-Item -ItemType Directory -Force -Path $dir | Out-Null
     $zip = Join-Path $dir "aosp_cf_x86_64_only_phone-img-$id.zip"
-    Say "  скачиваю образы сборки $id (~1,1 ГБ)"
-    Download "https://ci.android.com/builds/submitted/$id/$target/latest/raw/aosp_cf_x86_64_only_phone-img-$id.zip" $zip
+    Say "  скачиваю образы сборки $id (~1,1 ГБ; при обрыве скачивание продолжится с того же места)"
+    Download-Large "https://ci.android.com/builds/submitted/$id/$target/latest/raw/aosp_cf_x86_64_only_phone-img-$id.zip" $zip
     Say '  распаковываю (несколько минут)'
     $tar = Get-Command tar -ErrorAction SilentlyContinue
     if ($tar) { $null = Native $tar.Source @('-xf', $zip, '-C', $dir) }
@@ -464,7 +569,7 @@ function Test-Stage1([string]$Name, [int]$N) {
 if ($Stages -contains 1 -and $kernel -and (Test-Path $Exe)) {
     Step 'Этап 1: ядро Linux + busybox'
     Test-Stage1 'stage1' 1
-    Test-Stage1 'stage1-smp' ([math]::Min($Cpus, 4))
+    Test-Stage1 'stage1-smp' $(if ($Cpus -gt 0) { [math]::Min($Cpus, 4) } else { 4 })
 }
 
 # ------------------------------------------------------------ этап 2 ---
@@ -496,14 +601,25 @@ if ($Stages -contains 2 -and $images -and (Test-Path $Exe)) {
 # ------------------------------------------------------------ этап 3 ---
 
 if ($Stages -contains 3 -and $images -and (Test-Path $Exe)) {
-    Step "Этап 3: Android в окне ($Display, до $Stage3Seconds с)"
+    $gpuMode = $Gpu
+    if ($gpuMode -eq 'auto') {
+        $gpuMode = if ($script:GfxstreamOk) { 'gfxstream' } elseif ($script:GfxstreamGlOk) { 'gfxstream-gl' } else { 'software' }
+    }
+    Step "Этап 3: Android в окне ($Display, графика $gpuMode, до $Stage3Seconds с)"
     Say '  Сейчас откроется окно RustDroid. Первая загрузка с программным рендером занимает' 'Yellow'
     Say '  несколько минут. Когда появится экран Android:' 'Yellow'
     Say '    1) тапните левой кнопкой мыши по значку или кнопке;' 'Yellow'
     Say '    2) сделайте свайп (зажмите левую кнопку и проведите), например потяните шторку сверху;' 'Yellow'
     Say '    3) откройте поле ввода (поиск) и напечатайте что-нибудь с клавиатуры.' 'Yellow'
-    Say '  Когда Android загрузится, скрипт подаст звук. Проверьте и закройте окно —' 'Yellow'
-    Say "  ждать все $Stage3Seconds с не нужно." 'Yellow'
+    Say '       Навигация: Esc или правый клик — «Назад», F2 — «Домой», F3 — «Недавние».' 'Yellow'
+    Say '       Колесо мыши — прокрутка списка под курсором.' 'Yellow'
+    Say '    4) для замера скорости: 30 секунд подряд листайте список (Настройки или все' 'Yellow'
+    Say '       приложения) и запомните FPS в оверлее. На неподвижном экране Android не рисует' 'Yellow'
+    Say '       новых кадров — FPS там не показатель.' 'Yellow'
+    Say '    5) проверка зависания: 3 минуты НЕ трогайте окно (мышь в сторону). Смотрите на часы' 'Yellow'
+    Say '       в строке состояния: идут ли минуты, не замирает ли картинка. Потом коснитесь.' 'Yellow'
+    Say '  Когда Android загрузится, скрипт подаст звук. Пройдите все пункты и закройте окно —' 'Yellow'
+    Say "  ждать все $Stage3Seconds с не нужно (но пункт 5 — обязательно 3 минуты)." 'Yellow'
     Say '  Скриншоты окна делаются автоматически раз в 30 секунд (только окно RustDroid).' 'Yellow'
     if (-not $Yes) { Read-Host '  Нажмите Enter, чтобы начать' | Out-Null }
 
@@ -530,10 +646,38 @@ if ($Stages -contains 3 -and $images -and (Test-Path $Exe)) {
         $png = Join-Path $Out ('stage3-shot-{0:D2}.png' -f $script:shot)
         try { $null = [RdShot]::Capture($p.MainWindowHandle, $png) } catch { }
     }
-    $rc = Run-Vm 'stage3' @('boot-android', '--images', $images, '--instance', 'hwtest',
+    $stage3Start = Get-Date
+    $stage3Args = @('boot-android', '--images', $images, '--instance', 'hwtest',
         '--memory', "$Memory", '--cpus', "$Cpus", '--display', $Display, '--timeout', "$Stage3Seconds",
-        '--serial-log', $serial, '--logcat', (Join-Path $Out 'stage3-logcat.txt'), '-v') $Stage3Seconds $snap
+        '--gpu', $gpuMode, '--serial-log', $serial, '--logcat', (Join-Path $Out 'stage3-logcat.txt'),
+        '--console-input-delay', '30', '-v')
+    # Без этапа 2 инстанс не сбрасывался: после аварийно завершённых прогонов на /metadata
+    # оставались пустые файлы флагов aconfig, и system_server падал по кругу.
+    if ($Stages -notcontains 2 -and -not $KeepInstance) { $stage3Args += '--reset' }
+    if ($Append) {
+        $stage3Args += @('--append', $Append)
+        "stage3 append: $Append" | Add-Content -Path (Join-Path $Out 'system.txt') -Encoding UTF8
+    }
+    if (-not $NoNet) { $stage3Args += @('--net', 'user') }
+    if ($KeepInstance) { "stage3 instance: kept" | Add-Content -Path (Join-Path $Out 'system.txt') -Encoding UTF8 }
+    # Профиль гостя: после загрузки shell на консоли раз в 10 с печатает top (строки с «TOP »).
+    $guestTop = 'while [ "$(getprop sys.boot_completed)" != 1 ]; do sleep 5; done; sleep 15; ' +
+        "top -b -d 10 -n 40 -m 12 2>&1 | sed 's/^/TOP /'`n"
+    $rc = Run-Vm 'stage3' $stage3Args $Stage3Seconds $snap $guestTop
     Say "  код выхода: $rc"
+    "stage3 gpu: $gpuMode" | Add-Content -Path (Join-Path $Out 'system.txt') -Encoding UTF8
+    Ok "stage3: графика $gpuMode"
+    $hex = '0x{0:X8}' -f ([int64]$rc -band 0xFFFFFFFF)
+    if ($rc -eq 0) { Ok 'stage3: rustdroid завершился нормально' } else { Warn "stage3: код выхода $rc ($hex)" }
+    # Если процесс упал, Windows пишет в журнал «Приложение» модуль и код исключения.
+    try {
+        $crash = @(Get-WinEvent -FilterHashtable @{ LogName = 'Application'; ProviderName = 'Application Error'; StartTime = $stage3Start } -ErrorAction Stop |
+            Where-Object { $_.Message -match 'rustdroid' })
+        if ($crash.Count -gt 0) {
+            $crash | ForEach-Object { $_.Message; '' } | Set-Content (Join-Path $Out 'stage3-crash.txt') -Encoding UTF8
+            Warn "stage3: процесс rustdroid упал — подробности в stage3-crash.txt"
+        }
+    } catch { }
     Report-Android 'stage3' $serial
 
     $frames = Select-String -Path (Join-Path $Out 'stage3-stderr.log'), (Join-Path $Out 'stage3-stdout.log') `
@@ -544,6 +688,51 @@ if ($Stages -contains 3 -and $images -and (Test-Path $Exe)) {
     } else {
         Warn 'stage3: нет строк «кадры гостя» — экран мог не появиться'
     }
+    if (Select-String -Path $serial -Pattern 'rustdroid: guest setup done' -SimpleMatch -Quiet -ErrorAction SilentlyContinue) {
+        Ok 'stage3: настройка гостя выполнена (экран не гаснет)'
+    } else {
+        Warn 'stage3: нет отметки настройки гостя — экран Android может гаснуть без касаний'
+    }
+    $top = Select-String -Path $serial -Pattern '^TOP ' -Encoding UTF8 -ErrorAction SilentlyContinue
+    if ($top) {
+        $top | ForEach-Object { $_.Line } | Set-Content (Join-Path $Out 'stage3-guest-top.txt') -Encoding UTF8
+        Ok "stage3: процессы гостя (top) в stage3-guest-top.txt"
+    } else {
+        Warn 'stage3: нет вывода top из консоли гостя'
+    }
+    # Сеть гостя: DHCP на стороне хоста и диагностика из консоли гостя (NETDIAG).
+    if (-not $NoNet) {
+        $dhcp = Select-String -Path (Join-Path $Out 'stage3-stderr.log'), (Join-Path $Out 'stage3-stdout.log') `
+            -Pattern 'DHCP: гостю выдан адрес' -SimpleMatch -Encoding UTF8 -ErrorAction SilentlyContinue
+        if ($dhcp) { Ok 'stage3: гость получил адрес по DHCP (сеть virtio-net работает)' }
+        else { Warn 'stage3: гость не запрашивал DHCP — Android не использует сетевую карту' }
+        $netdiag = Select-String -Path $serial -Pattern 'NETDIAG ' -SimpleMatch -Encoding UTF8 -ErrorAction SilentlyContinue
+        if ($netdiag) {
+            $netdiag | ForEach-Object { $_.Line -replace '^.*?NETDIAG ', '' } |
+                Set-Content (Join-Path $Out 'stage3-net.txt') -Encoding UTF8
+            Ok 'stage3: диагностика сети гостя в stage3-net.txt'
+        } else {
+            Warn 'stage3: нет диагностики сети из консоли гостя'
+        }
+    }
+    # Профиль: загрузка CPU по потокам и время команд virtio-gpu (раз в 10 с).
+    $perf = Select-String -Path (Join-Path $Out 'stage3-stderr.log'), (Join-Path $Out 'stage3-stdout.log') `
+        -Pattern 'кадры гостя', 'профиль CPU', 'время команд virtio-gpu', 'пульс гостя', 'содержимое кадров', 'снимок экрана гостя' -SimpleMatch -Encoding UTF8 -ErrorAction SilentlyContinue
+    if ($perf) {
+        $perf | ForEach-Object { $_.Line -replace '\x1b\[[0-9;]*m', '' } |
+            Set-Content (Join-Path $Out 'stage3-perf.txt') -Encoding UTF8
+        Ok 'stage3: профиль производительности в stage3-perf.txt'
+    }
+    # Пульс гостя: строка раз в 5 с из shell гостя; опоздание — гость не просыпался по таймеру.
+    $late = Select-String -Path (Join-Path $Out 'stage3-stderr.log'), (Join-Path $Out 'stage3-stdout.log') `
+        -Pattern 'пульс гостя: опоздание' -SimpleMatch -Encoding UTF8 -ErrorAction SilentlyContinue
+    if ($late) {
+        Warn "stage3: пульс гостя опаздывал $(@($late).Count) раз — гость засыпал дольше таймера"
+    } elseif (Select-String -Path $serial -Pattern 'rustdroid: hb ' -SimpleMatch -Quiet -ErrorAction SilentlyContinue) {
+        Ok 'stage3: пульс гостя без опозданий'
+    } else {
+        Warn 'stage3: нет пульса гостя в консоли'
+    }
 
     Step 'Ваши наблюдения'
     $answers = @()
@@ -552,7 +741,11 @@ if ($Stages -contains 3 -and $images -and (Test-Path $Exe)) {
             'Работает ли тап мышью?',
             'Работает ли свайп?',
             'Работает ли ввод с клавиатуры?',
+            'Работают ли Esc/правый клик («Назад»), F2 («Домой»), F3 («Недавние»)?',
+            'Прокручивает ли колесо мыши списки (Настройки, все приложения)?',
             'Видны ли оверлей FPS и график в углу?',
+            'За 3 минуты без касаний: шли ли часы, замирала ли картинка? (через сколько)',
+            'Какой FPS в оверлее, пока листаете список? (число или «не мерил»)',
             'Что-то ещё (подвисания, артефакты, ошибки)?')) {
         $a = if ($Yes) { '(не спрашивали: -Yes)' } else { Read-Host "  $q" }
         $answers += "$q`n  -> $a"
@@ -582,4 +775,66 @@ $zip = "$Out.zip"
 Compress-Archive -Path (Join-Path $Out '*') -DestinationPath $zip -Force
 Say ''
 Say "Готово. Архив с результатами: $zip" 'Green'
-Say 'Пришлите его в чат (или приложите к issue на GitHub).' 'Green'
+
+# Отчёт на GitHub: архив — в pre-release hw-reports, итог и ответы — в новое issue.
+function Send-Report([string]$Zip) {
+    # gh пишет прогресс и статус в stderr: при Stop Windows PowerShell считал бы это ошибкой.
+    $ErrorActionPreference = 'Continue'
+    $gh = Get-Command gh -ErrorAction SilentlyContinue
+    if (-not $gh) {
+        Say 'GitHub CLI (gh) не установлен — отчёт не отправлен. Один раз выполните:' 'Yellow'
+        Say '  winget install GitHub.cli   (потом откройте PowerShell заново)' 'Yellow'
+        Say '  gh auth login' 'Yellow'
+        return $false
+    }
+    & gh auth status *> $null
+    if ($LASTEXITCODE -ne 0) {
+        Say 'GitHub CLI не авторизован — отчёт не отправлен. Выполните: gh auth login' 'Yellow'
+        return $false
+    }
+    $repo = "$Owner/$RepoName"
+    $tag = 'hw-reports'
+    & gh release view $tag -R $repo *> $null
+    if ($LASTEXITCODE -ne 0) {
+        & gh release create $tag -R $repo --prerelease --title 'Отчёты hw-test' `
+            --notes 'Архивы hw-test.ps1 с реального железа.' *> $null
+    }
+    Say "  загружаю архив в $repo, релиз $tag..."
+    & gh release upload $tag $Zip -R $repo --clobber | Out-Host
+    if ($LASTEXITCODE -ne 0) { Say 'Не удалось загрузить архив на GitHub.' 'Yellow'; return $false }
+    $name = Split-Path -Leaf $Zip
+    $url = "https://github.com/$repo/releases/download/$tag/$name"
+    $commitLine = Select-String -Path (Join-Path $Out 'system.txt') -Pattern '^commit: (\w{7})' -Encoding UTF8 |
+        Select-Object -First 1
+    $commit = if ($commitLine) { $commitLine.Matches[0].Groups[1].Value } else { '?' }
+    $cpuName = if ($cpu) { $cpu.Name.Trim() } else { 'CPU?' }
+    $body = @('Отчёт `hw-test.ps1`.', '', "Архив: $url", '', '### Итог', '```')
+    $body += Get-Content (Join-Path $Out 'summary.txt') -Encoding UTF8
+    $body += '```'
+    $answers = Join-Path $Out 'stage3-answers.txt'
+    if (Test-Path $answers) {
+        $body += @('', '### Ответы', '```')
+        $body += Get-Content $answers -Encoding UTF8
+        $body += '```'
+    }
+    $frames = Join-Path $Out 'stage3-frames.txt'
+    if (Test-Path $frames) {
+        $body += @('', '### Кадры гостя (последние строки)', '```')
+        $body += Get-Content $frames -Encoding UTF8 | Select-Object -Last 6 |
+            ForEach-Object { ($_ -replace "$([char]27)\[[0-9;]*m", '') -replace '^.*кадры гостя ', '' }
+        $body += '```'
+    }
+    $bodyFile = Join-Path $Work 'issue-body.md'
+    # UTF-8 без BOM: иначе BOM попадёт в начало текста issue.
+    [IO.File]::WriteAllLines($bodyFile, [string[]]$body, (New-Object Text.UTF8Encoding $false))
+    $title = "hw-test: $cpuName, $commit, $Stamp"
+    $issue = (& gh issue create -R $repo --title $title --body-file $bodyFile | Select-Object -Last 1)
+    if ($LASTEXITCODE -ne 0) { Say 'Архив загружен, но issue не создано.' 'Yellow'; return $false }
+    Say "Отчёт отправлен: $issue" 'Green'
+    return $true
+}
+$sent = $false
+if (-not $NoUpload) {
+    try { $sent = Send-Report $zip } catch { Say "Отчёт не отправлен: $_" 'Yellow' }
+}
+if (-not $sent) { Say 'Пришлите архив в чат (или приложите к issue на GitHub).' 'Green' }

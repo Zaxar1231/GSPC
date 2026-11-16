@@ -11,6 +11,8 @@ publish.workspace = true
 
 [dependencies]
 crc32fast.workspace = true
+rustdroid-guest-agent.workspace = true
+rustdroid-net.workspace = true
 rustdroid-virtio.workspace = true
 tracing.workspace = true
 vm-superio.workspace = true

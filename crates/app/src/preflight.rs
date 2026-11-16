@@ -13,7 +13,12 @@ const WINDOWS_11_BUILD: u32 = 22000;
 #[derive(Debug)]
 pub(crate) enum Check {
     Ok(String),
-    Fail { problem: String, fix: &'static str },
+    /// Не мешает запуску, но что-то работает хуже (например, нет 3D на видеокарте).
+    Warn(String),
+    Fail {
+        problem: String,
+        fix: &'static str,
+    },
 }
 
 fn windows_build() -> Option<(u32, u32, u32)> {
@@ -111,20 +116,22 @@ fn mhz(hz: u64) -> f64 {
 }
 
 /// Все проверки.
-pub(crate) fn checks() -> Vec<Check> {
+pub(crate) fn checks(verbose: u8) -> Vec<Check> {
     let mut v = vec![check_windows()];
     v.extend(check_hypervisor());
     v.push(check_cpu());
+    v.extend(crate::gpu_probe::checks(verbose));
     v
 }
 
 /// Печатает результаты; ошибка, если хоть одна проверка не прошла.
-pub(crate) fn run() -> Result<()> {
-    let results = checks();
+pub(crate) fn run(verbose: u8) -> Result<()> {
+    let results = checks(verbose);
     let mut failed = 0;
     for c in &results {
         match c {
             Check::Ok(msg) => tracing::info!("[ OK ] {msg}"),
+            Check::Warn(msg) => tracing::warn!("[WARN] {msg}"),
             Check::Fail { problem, fix } => {
                 failed += 1;
                 tracing::error!("[FAIL] {problem}");

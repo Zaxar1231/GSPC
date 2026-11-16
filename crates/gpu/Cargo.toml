@@ -11,7 +11,11 @@ publish.workspace = true
 
 [dependencies]
 rustdroid-virtio.workspace = true
+thiserror.workspace = true
 tracing.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+rustdroid-gfxstream.workspace = true
 
 [dev-dependencies]
 rustdroid-virtio = { workspace = true, features = ["test-utils"] }

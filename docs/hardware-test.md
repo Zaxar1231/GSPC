@@ -23,6 +23,8 @@ powershell -ExecutionPolicy Bypass -File $env:TEMP\hw-test.ps1
 | Система | Windows, CPU, RAM, GPU, Hyper-V / WHPX / VBS → `system.txt` | секунды |
 | WHPX | если «Платформа низкоуровневой оболочки Windows» выключена — предлагает включить | UAC, перезагрузка |
 | Программа | готовый `rustdroid.exe` из pre-release `nightly-<ветка>` (собирается GitHub Actions после каждого изменения), проверка sha256 | ~10 с |
+| gfxstream | `gfxstream_backend.dll` из pre-release `deps-gfxstream` рядом с `rustdroid.exe`, проверка sha256 | ~5 с |
+| Проверка | `rustdroid -v check`: Windows, WHPX, CPU, Vulkan (видеокарты и версии), запуск gfxstream на Vulkan | ~10 с |
 | Образы | Cuttlefish x86_64 с ci.android.com, распаковка; дальше — из кэша | первый раз 5–15 мин, потом 0 |
 | Этап 3 | Android в окне 1280×720 @ 60 Гц; когда Android загрузится — звук и сообщение; скриншоты окна раз в 30 с | пока не закроете окно, максимум 10 мин |
 | Итог | всё в `Рабочий стол\RustDroid-test-<дата>.zip` | — |
@@ -30,6 +32,20 @@ powershell -ExecutionPolicy Bypass -File $env:TEMP\hw-test.ps1
 С `-FromSource` скрипт работает как раньше: ставит Git, Rust и Visual Studio Build Tools, собирает
 из исходников и может прогнать этапы 1–2 (`-Stages 1,2,3`). Это нужно, только если готовой
 сборки нет или проверяется локальное изменение.
+
+## Только проверка 3D
+
+Без образов и запуска Android, около минуты:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File $env:TEMP\hw-test.ps1 -Branch feat/stage-4-3d -CheckOnly
+```
+
+В `summary.txt` попадут строки `Vulkan: …` (какие видеокарты видит Vulkan и его версия) и
+`gfxstream: …` (запустился ли gfxstream и какие capsets отдаёт). Проверка gfxstream идёт в
+отдельном процессе: если драйвер или gfxstream упадут, `rustdroid check` это переживёт и
+напишет `проверка 3D завершилась аварийно`. Нет Vulkan или gfxstream не запустился — это
+предупреждение, а не ошибка: Android работает с программным рендером.
 
 ## Параметры
 
@@ -43,6 +59,8 @@ powershell -ExecutionPolicy Bypass -File scripts\hw-test.ps1 -FromSource -SkipBu
 |---|---|---|
 | `-Stages` | `3` | какие этапы проверять (этап 1 — только с `-FromSource`) |
 | `-FromSource` | — | собрать из исходников вместо готовой сборки |
+| `-CheckOnly` | — | только проверка системы и 3D, без образов и Android |
+| `-Gpu` | `auto` | графика этапа 3: `auto` — gfxstream, если его прошла проверка 3D, иначе `software`; `gfxstream`; `software` |
 | `-Memory` / `-Cpus` | `4096` / `4` | RAM (МиБ) и vCPU гостя Android |
 | `-Display` | `1280x720@60` | окно этапа 3 |
 | `-Stage2Seconds` / `-Stage3Seconds` | `300` / `600` | сколько работает ВМ |

@@ -1,0 +1,166 @@
+diff --git a/host/vulkan/cereal/common/goldfish_vk_dispatch.cpp b/host/vulkan/cereal/common/goldfish_vk_dispatch.cpp
+index 3008e0c..240b791 100644
+--- a/host/vulkan/cereal/common/goldfish_vk_dispatch.cpp
++++ b/host/vulkan/cereal/common/goldfish_vk_dispatch.cpp
+@@ -34,12 +34,153 @@
+ #include <stdlib.h>
+ #include <string.h>
+ 
++#include <vector>
++
+ #include "gfxstream/common/logging.h"
+ 
+ namespace gfxstream {
+ namespace host {
+ namespace vk {
+ 
++// RustDroid: synchronization2 commands on drivers without VK_KHR_synchronization2 (e.g. Intel UHD
++// 27.20.100.x, Vulkan 1.2). The guest driver may record vkCmd*2 regardless; these shims translate
++// them into the legacy commands of the device, captured when its dispatch is initialized.
++namespace sync2_compat {
++
++PFN_vkCmdPipelineBarrier s_pipelineBarrier = nullptr;
++PFN_vkCmdWaitEvents s_waitEvents = nullptr;
++PFN_vkCmdSetEvent s_setEvent = nullptr;
++PFN_vkCmdResetEvent s_resetEvent = nullptr;
++PFN_vkCmdWriteTimestamp s_writeTimestamp = nullptr;
++
++VkPipelineStageFlags stages(VkPipelineStageFlags2 s, VkPipelineStageFlags ifNone) {
++    if ((s >> 32) != 0) return VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
++    const VkPipelineStageFlags low = static_cast<VkPipelineStageFlags>(s);
++    return low ? low : ifNone;
++}
++
++VkAccessFlags access(VkAccessFlags2 a) {
++    VkAccessFlags low = static_cast<VkAccessFlags>(a & 0xFFFFFFFFull);
++    if (a & (VK_ACCESS_2_SHADER_SAMPLED_READ_BIT | VK_ACCESS_2_SHADER_STORAGE_READ_BIT)) {
++        low |= VK_ACCESS_SHADER_READ_BIT;
++    }
++    if (a & VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT) low |= VK_ACCESS_SHADER_WRITE_BIT;
++    const VkAccessFlags2 known = 0xFFFFFFFFull | VK_ACCESS_2_SHADER_SAMPLED_READ_BIT |
++                                 VK_ACCESS_2_SHADER_STORAGE_READ_BIT |
++                                 VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT;
++    if (a & ~known) low |= VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT;
++    return low;
++}
++
++struct Legacy {
++    VkPipelineStageFlags src = 0;
++    VkPipelineStageFlags dst = 0;
++    std::vector<VkMemoryBarrier> memory;
++    std::vector<VkBufferMemoryBarrier> buffers;
++    std::vector<VkImageMemoryBarrier> images;
++
++    void add(const VkDependencyInfo& d) {
++        for (uint32_t i = 0; i < d.memoryBarrierCount; i++) {
++            const VkMemoryBarrier2& b = d.pMemoryBarriers[i];
++            src |= stages(b.srcStageMask, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT);
++            dst |= stages(b.dstStageMask, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT);
++            memory.push_back({VK_STRUCTURE_TYPE_MEMORY_BARRIER, nullptr, access(b.srcAccessMask),
++                              access(b.dstAccessMask)});
++        }
++        for (uint32_t i = 0; i < d.bufferMemoryBarrierCount; i++) {
++            const VkBufferMemoryBarrier2& b = d.pBufferMemoryBarriers[i];
++            src |= stages(b.srcStageMask, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT);
++            dst |= stages(b.dstStageMask, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT);
++            buffers.push_back({VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER, b.pNext,
++                               access(b.srcAccessMask), access(b.dstAccessMask),
++                               b.srcQueueFamilyIndex, b.dstQueueFamilyIndex, b.buffer, b.offset,
++                               b.size});
++        }
++        for (uint32_t i = 0; i < d.imageMemoryBarrierCount; i++) {
++            const VkImageMemoryBarrier2& b = d.pImageMemoryBarriers[i];
++            src |= stages(b.srcStageMask, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT);
++            dst |= stages(b.dstStageMask, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT);
++            images.push_back({VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER, b.pNext,
++                              access(b.srcAccessMask), access(b.dstAccessMask), b.oldLayout,
++                              b.newLayout, b.srcQueueFamilyIndex, b.dstQueueFamilyIndex, b.image,
++                              b.subresourceRange});
++        }
++    }
++    VkPipelineStageFlags srcStages() const { return src ? src : VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT; }
++    VkPipelineStageFlags dstStages() const {
++        return dst ? dst : VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT;
++    }
++};
++
++VKAPI_ATTR void VKAPI_CALL CmdPipelineBarrier2(VkCommandBuffer cb, const VkDependencyInfo* d) {
++    if (!s_pipelineBarrier || !d) return;
++    Legacy l;
++    l.add(*d);
++    s_pipelineBarrier(cb, l.srcStages(), l.dstStages(), d->dependencyFlags,
++                      static_cast<uint32_t>(l.memory.size()), l.memory.data(),
++                      static_cast<uint32_t>(l.buffers.size()), l.buffers.data(),
++                      static_cast<uint32_t>(l.images.size()), l.images.data());
++}
++
++VKAPI_ATTR void VKAPI_CALL CmdWaitEvents2(VkCommandBuffer cb, uint32_t eventCount,
++                                         const VkEvent* events, const VkDependencyInfo* d) {
++    if (!s_waitEvents) return;
++    Legacy l;
++    for (uint32_t i = 0; d && i < eventCount; i++) l.add(d[i]);
++    s_waitEvents(cb, eventCount, events, l.srcStages(), l.dstStages(),
++                 static_cast<uint32_t>(l.memory.size()), l.memory.data(),
++                 static_cast<uint32_t>(l.buffers.size()), l.buffers.data(),
++                 static_cast<uint32_t>(l.images.size()), l.images.data());
++}
++
++VKAPI_ATTR void VKAPI_CALL CmdSetEvent2(VkCommandBuffer cb, VkEvent event,
++                                       const VkDependencyInfo* d) {
++    if (!s_setEvent) return;
++    Legacy l;
++    if (d) l.add(*d);
++    s_setEvent(cb, event, l.srcStages());
++}
++
++VKAPI_ATTR void VKAPI_CALL CmdResetEvent2(VkCommandBuffer cb, VkEvent event,
++                                         VkPipelineStageFlags2 stageMask) {
++    if (!s_resetEvent) return;
++    s_resetEvent(cb, event, stages(stageMask, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT));
++}
++
++VKAPI_ATTR void VKAPI_CALL CmdWriteTimestamp2(VkCommandBuffer cb, VkPipelineStageFlags2 stage,
++                                             VkQueryPool pool, uint32_t query) {
++    if (!s_writeTimestamp) return;
++    VkPipelineStageFlagBits bit = VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT;
++    if (stage == VK_PIPELINE_STAGE_2_NONE) {
++        bit = VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
++    } else if ((stage >> 32) == 0) {
++        bit = static_cast<VkPipelineStageFlagBits>(stage);
++    }
++    s_writeTimestamp(cb, bit, pool, query);
++}
++
++void install(VulkanDispatch* out) {
++    if (out->vkCmdPipelineBarrier2 || !out->vkCmdPipelineBarrier) return;
++    s_pipelineBarrier = out->vkCmdPipelineBarrier;
++    s_waitEvents = out->vkCmdWaitEvents;
++    s_setEvent = out->vkCmdSetEvent;
++    s_resetEvent = out->vkCmdResetEvent;
++    s_writeTimestamp = out->vkCmdWriteTimestamp;
++    out->vkCmdPipelineBarrier2 = CmdPipelineBarrier2;
++    out->vkCmdWaitEvents2 = CmdWaitEvents2;
++    out->vkCmdSetEvent2 = CmdSetEvent2;
++    out->vkCmdResetEvent2 = CmdResetEvent2;
++    out->vkCmdWriteTimestamp2 = CmdWriteTimestamp2;
++    if (!out->vkCmdPipelineBarrier2KHR) out->vkCmdPipelineBarrier2KHR = CmdPipelineBarrier2;
++    if (!out->vkCmdWaitEvents2KHR) out->vkCmdWaitEvents2KHR = CmdWaitEvents2;
++    if (!out->vkCmdSetEvent2KHR) out->vkCmdSetEvent2KHR = CmdSetEvent2;
++    if (!out->vkCmdResetEvent2KHR) out->vkCmdResetEvent2KHR = CmdResetEvent2;
++    if (!out->vkCmdWriteTimestamp2KHR) out->vkCmdWriteTimestamp2KHR = CmdWriteTimestamp2;
++    GFXSTREAM_INFO("RustDroid: no synchronization2 in the driver, emulating vkCmd*2 commands");
++}
++
++}  // namespace sync2_compat
++
+ void init_vulkan_dispatch_from_system_loader(DlOpenFunc dlOpenFunc, DlSymFunc dlSymFunc,
+                                              VulkanDispatch* out) {
+     memset(out, 0x0, sizeof(VulkanDispatch));
+@@ -3300,6 +3441,7 @@ void init_vulkan_dispatch_from_device(VulkanDispatch* vk, VkDevice device, Vulka
+     if (!out->vkDestroyPrivateDataSlot) out->vkDestroyPrivateDataSlot = (PFN_vkDestroyPrivateDataSlot)out->vkDestroyPrivateDataSlotEXT;
+     if (!out->vkSetPrivateData) out->vkSetPrivateData = (PFN_vkSetPrivateData)out->vkSetPrivateDataEXT;
+     if (!out->vkGetPrivateData) out->vkGetPrivateData = (PFN_vkGetPrivateData)out->vkGetPrivateDataEXT;
++    sync2_compat::install(out);
+ 
+ }
+ 

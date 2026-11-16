@@ -25,6 +25,35 @@ pub(crate) enum Command {
     Boot(BootArgs),
     /// Загрузить Android из каталога образов Cuttlefish x86_64.
     BootAndroid(AndroidArgs),
+    /// Проверка 3D (Vulkan и gfxstream) в отдельном процессе; её запускает `check`.
+    #[command(hide = true)]
+    GpuProbe {
+        /// Проверить gfxstream на ANGLE/Direct3D 11 (уровень 2) вместо Vulkan.
+        #[arg(long)]
+        gl: bool,
+    },
+}
+
+/// Графика гостя.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub(crate) enum GpuMode {
+    /// Программный рендер в госте, virtio-gpu 2D.
+    Software,
+    /// 3D на видеокарте хоста: gfxstream, в госте ANGLE поверх Vulkan.
+    Gfxstream,
+    /// 3D для видеокарт без Vulkan: gfxstream на ANGLE (Direct3D 11), в госте драйвер GLES
+    /// gfxstream.
+    GfxstreamGl,
+}
+
+/// Сеть гостя.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub(crate) enum NetMode {
+    /// Сетевой карты нет.
+    None,
+    /// virtio-net с NAT в пользовательском режиме: гость `10.0.2.15`, шлюз и хост `10.0.2.2`,
+    /// DNS `10.0.2.3`; без драйверов и прав администратора.
+    User,
 }
 
 /// Куда направлять ввод с клавиатуры.
@@ -36,6 +65,19 @@ pub(crate) enum ConsoleKind {
     Hvc,
 }
 
+/// Сколько vCPU дать гостю на хосте с `host` логическими процессорами: хосту остаётся
+/// четверть, но не меньше двух (gfxstream и драйвер видеокарты работают на хосте, пока гость
+/// ждёт их ответа), гостю — от 1 до 8.
+#[must_use]
+#[cfg_attr(
+    not(windows),
+    allow(dead_code, reason = "ВМ запускается только в Windows-сборке")
+)]
+pub(crate) fn auto_vcpus(host: u32) -> u32 {
+    let reserve = (host / 4).max(2);
+    host.saturating_sub(reserve).clamp(1, 8)
+}
+
 /// Общие параметры ВМ.
 #[derive(Debug, Args)]
 pub(crate) struct VmArgs {
@@ -43,7 +85,8 @@ pub(crate) struct VmArgs {
     #[arg(long, default_value_t = 2048)]
     pub memory: u64,
 
-    /// Число vCPU.
+    /// Число vCPU; 0 — подобрать под компьютер (часть логических процессоров остаётся
+    /// gfxstream, драйверу видеокарты и окну).
     #[arg(long, default_value_t = 1)]
     pub cpus: u32,
 
@@ -72,6 +115,21 @@ pub(crate) struct VmArgs {
     #[arg(long)]
     pub display: Option<String>,
 
+    /// Графика гостя в окне: `software` — программный рендер в госте (SwiftShader), `gfxstream`
+    /// — 3D на видеокарте хоста через gfxstream (нужна gfxstream_backend.dll и Vulkan).
+    #[arg(long, value_enum, default_value_t = GpuMode::Software)]
+    pub gpu: GpuMode,
+
+    /// Гостевой агент (бинарник rustdroid-agent для Android): доставляется в гость через
+    /// консоль и запускается. Пока не проверено на железе.
+    #[arg(long)]
+    pub agent: Option<std::path::PathBuf>,
+
+    /// Сеть гостя: `user` — virtio-net с NAT в пользовательском режиме (интернет через сеть
+    /// хоста без драйверов и прав администратора), `none` — без сети.
+    #[arg(long, value_enum, default_value_t = NetMode::None)]
+    pub net: NetMode,
+
     /// Выводить без VSync (tearing; для VRR/G-Sync/FreeSync).
     #[arg(long)]
     pub no_vsync: bool,
@@ -87,6 +145,11 @@ pub(crate) struct VmArgs {
     /// Остановить ВМ через N секунд (0 — не останавливать). Для автоматических проверок.
     #[arg(long, default_value_t = 0)]
     pub timeout: u64,
+
+    /// Начать передавать ввод консоли (stdin) гостю через N секунд. Для автоматических
+    /// проверок: ввод, пришедший до запуска shell на консоли, терминал гостя теряет.
+    #[arg(long, default_value_t = 0)]
+    pub console_input_delay: u64,
 }
 
 /// Разобранный режим `--display`.
@@ -249,6 +312,13 @@ mod tests {
         assert_eq!(b.kernel, PathBuf::from("bzImage"));
         assert_eq!(b.vm.memory, 1024);
         assert_eq!(b.vm.cpus, 4);
+        assert_eq!(auto_vcpus(1), 1);
+        assert_eq!(auto_vcpus(2), 1);
+        assert_eq!(auto_vcpus(4), 2);
+        assert_eq!(auto_vcpus(8), 6);
+        assert_eq!(auto_vcpus(6), 4);
+        assert_eq!(auto_vcpus(12), 8);
+        assert_eq!(auto_vcpus(32), 8);
         assert_eq!(b.vm.console, ConsoleKind::Hvc);
         assert_eq!(b.disks.len(), 2);
     }

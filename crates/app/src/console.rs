@@ -4,13 +4,13 @@ use std::fs::File;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, PoisonError};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 use rustdroid_devices::cf_services::{OemLock, SensorsControl, ServiceEndpoint};
 use rustdroid_devices::{
     CompositeDisk, ConsoleInput, CowDisk, Disk, Partition, RawDisk, Serial16550, SparseDisk,
-    ZeroDisk, open_image,
+    VsockOutbox, ZeroDisk, open_image,
 };
 use rustdroid_instance::DataDirs;
 use rustdroid_instance::android::{
@@ -24,8 +24,8 @@ use windows::Win32::System::Console::{
     GetStdHandle, STD_INPUT_HANDLE, STD_OUTPUT_HANDLE, SetConsoleMode,
 };
 
-use crate::cli::{AndroidArgs, BootArgs, ConsoleKind, DiskSpec, DisplaySpec, VmArgs};
-use crate::display;
+use crate::cli::{AndroidArgs, BootArgs, ConsoleKind, DiskSpec, DisplaySpec, NetMode, VmArgs};
+use crate::{display, pulse};
 
 /// Префикс управляющих комбинаций (как в QEMU): Ctrl+A.
 const ESCAPE: u8 = 0x01;
@@ -34,6 +34,58 @@ const ESCAPE: u8 = 0x01;
 #[derive(Clone)]
 struct ConsoleOut {
     log: Option<Arc<Mutex<File>>>,
+    pulse: Arc<Mutex<PulseWatch>>,
+}
+
+/// Разбор пульса гостя в выводе консоли (см. [`crate::pulse`]).
+struct PulseWatch {
+    start: Instant,
+    scanner: pulse::Scanner,
+    snaps: pulse::Scanner,
+    last_snap: Option<String>,
+    tracker: pulse::Tracker,
+}
+
+impl PulseWatch {
+    fn new() -> Self {
+        Self {
+            start: Instant::now(),
+            scanner: pulse::Scanner::new(pulse::HB),
+            snaps: pulse::Scanner::new(pulse::SC),
+            last_snap: None,
+            tracker: pulse::Tracker::default(),
+        }
+    }
+
+    fn feed(&mut self, bytes: &[u8]) {
+        for mark in self.snaps.feed(bytes) {
+            let changed = mark.value != self.last_snap;
+            tracing::info!(
+                seq = mark.seq,
+                hash = mark.value.as_deref().unwrap_or("-"),
+                changed,
+                "снимок экрана гостя (screencap)"
+            );
+            self.last_snap = mark.value;
+        }
+        for pulse::Mark { seq, .. } in self.scanner.feed(bytes) {
+            let beat = self.tracker.beat(self.start.elapsed().as_secs_f64(), seq);
+            if beat.late >= pulse::LATE_SECS {
+                tracing::warn!(
+                    seq,
+                    late_s = format_args!("{:.1}", beat.late),
+                    "пульс гостя: опоздание — гость не просыпался по таймеру"
+                );
+            } else if seq % 12 == 0 {
+                tracing::info!(
+                    beats = self.tracker.beats,
+                    late = self.tracker.late_count,
+                    max_late_s = format_args!("{:.2}", self.tracker.max_late),
+                    "пульс гостя"
+                );
+            }
+        }
+    }
 }
 
 impl Write for ConsoleOut {
@@ -41,6 +93,10 @@ impl Write for ConsoleOut {
         let mut out = std::io::stdout().lock();
         out.write_all(buf)?;
         out.flush()?;
+        self.pulse
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .feed(buf);
         if let Some(f) = &self.log {
             f.lock()
                 .unwrap_or_else(PoisonError::into_inner)
@@ -131,10 +187,13 @@ impl InputTarget {
 }
 
 /// Поток ввода: клавиатура → гость. `Ctrl+A X` — остановить ВМ, `Ctrl+A Ctrl+A` — передать Ctrl+A.
-fn spawn_input(target: InputTarget, stopper: Stopper) -> std::io::Result<()> {
+fn spawn_input(target: InputTarget, stopper: Stopper, delay: Duration) -> std::io::Result<()> {
     std::thread::Builder::new()
         .name("console-input".into())
         .spawn(move || {
+            if !delay.is_zero() {
+                std::thread::sleep(delay);
+            }
             let mut stdin = std::io::stdin().lock();
             let mut buf = [0_u8; 256];
             let mut escape = false;
@@ -184,7 +243,22 @@ fn open_log(path: Option<&PathBuf>) -> Result<ConsoleOut> {
         .map(|p| File::create(p).with_context(|| format!("не удалось создать {}", p.display())))
         .transpose()?
         .map(|f| Arc::new(Mutex::new(f)));
-    Ok(ConsoleOut { log })
+    Ok(ConsoleOut {
+        log,
+        pulse: Arc::new(Mutex::new(PulseWatch::new())),
+    })
+}
+
+/// `--cpus 0` — подобрать по числу логических процессоров хоста.
+fn resolve_cpus(requested: u32) -> u32 {
+    if requested != 0 {
+        return requested;
+    }
+    let host = std::thread::available_parallelism()
+        .map_or(1, |n| u32::try_from(n.get()).unwrap_or(u32::MAX));
+    let cpus = crate::cli::auto_vcpus(host);
+    tracing::info!(host, cpus, "число vCPU подобрано под компьютер");
+    cpus
 }
 
 fn base_config(vm: &VmArgs, console: ConsoleKind, kernel: PathBuf) -> VmConfig {
@@ -193,7 +267,7 @@ fn base_config(vm: &VmArgs, console: ConsoleKind, kernel: PathBuf) -> VmConfig {
         initrd: None,
         initrd_data: None,
         memory_mib: vm.memory,
-        cpus: vm.cpus,
+        cpus: resolve_cpus(vm.cpus),
         cmdline_extra: vm.append.clone(),
         cmdline_override: None,
         large_pages: vm.large_pages,
@@ -205,10 +279,74 @@ fn base_config(vm: &VmArgs, console: ConsoleKind, kernel: PathBuf) -> VmConfig {
     }
 }
 
-fn run_vm(cfg: &VmConfig, mut devices: VmDevices, vm: &VmArgs, console: ConsoleKind) -> Result<()> {
+/// Через сколько после старта ВМ отдавать команды настройки shell на консоли гостя: раньше
+/// запуска shell (сервис `console`) ввод теряется.
+const GUEST_SETUP_DELAY: Duration = Duration::from_secs(20);
+
+/// Настройка Android в окне (shell на hvc0, после загрузки): экран не гаснет и не блокируется,
+/// пока окно открыто, — у эмулятора нет кнопки питания, а погасший экран выглядит как
+/// остановившееся приложение. UWB выключается: HAL UWB Cuttlefish ждёт симулятор на хосте,
+/// которого у нас нет, и на ошибку Android запускает полный bugreport (минуты нагрузки на CPU).
+/// `set +m` выключает управление заданиями: фоновая задача остаётся в группе процессов shell,
+/// которая на терминале «передняя», и не останавливается сигналами SIGTTIN/SIGTTOU (раньше
+/// настройка замирала на `svc`, top показывал остановленный процесс). Ввод команд — из
+/// `/dev/null`: `cmd`/`svc` подключают stdin к службе. Каждая команда — с тайм-аутом и строкой
+/// `rustdroid: setup rc=…` в логе консоли; маркер `guest setup done` — что настройка дошла до
+/// конца. Затем — пульс гостя `rustdroid: hb N` каждые 5 с (см. [`crate::pulse`]). Хэш
+/// `screencap` раз в 20 с убран: снимок экрана гостя — полная композиция и чтение кадра, он сам
+/// давал рывки кадров (замирание, ради которого он был нужен, на hw-test #24 не повторилось).
+const ANDROID_WINDOW_SETUP: &str = "set +m; (while [ \"$(getprop sys.boot_completed)\" != 1 ]; do sleep 2; done; \
+for c in 'settings put system screen_off_timeout 2147483647' \
+'settings put global stay_on_while_plugged_in 7' 'svc power stayon true' \
+'locksettings set-disabled true' 'cmd uwb disable-uwb'; do \
+timeout 30 $c </dev/null >/dev/null 2>&1; echo \"rustdroid: setup rc=$? $c\"; done; \
+echo rustdroid: guest setup done; n=0; while :; do sleep 5; n=$((n+1)); \
+echo \"rustdroid: hb $n\"; done) </dev/null &\n";
+
+/// Сеть гостя при `--net user`: init Cuttlefish прячет `eth0` службой `rename_eth0` (переименует
+/// в `buried_eth0`, чтобы Android не использовал карту). Shell гостя работает под root через
+/// `su 0` (SELinux в Permissive), поэтому возвращаем имя `eth0` и поднимаем интерфейс —
+/// тогда ConnectivityService запрашивает адрес по DHCP. Строки `NETFIX …` — в консоли.
+const NET_FIX: &str = "(i=0; while [ $i -lt 60 ]; do su 0 ip link show buried_eth0 >/dev/null 2>&1 && break; \
+sleep 1; i=$((i+1)); done; su 0 sh -c 'ip link set buried_eth0 down && ip link set buried_eth0 name eth0 \
+&& ip link set eth0 up' </dev/null 2>&1 | sed 's/^/NETFIX /'; echo 'NETFIX rc='$? ) &\n";
+
+/// Диагностика сети гостя при `--net user`: через 30 с после загрузки пишет в консоль строки
+/// `NETDIAG …` — адреса и маршруты, свойства сети, правила `eth0` в init Cuttlefish и пробное
+/// соединение с `1.1.1.1:80` в обход DNS (проверка маршрута и NAT). В начале — права оболочки
+/// консоли (`id`, `su 0 id`, режим SELinux, блочные устройства): от них зависит, как доставить
+/// в гость агента этапа 5.
+const NET_DIAG: &str = "(sleep 30; { echo '--- id'; id; su 0 id 2>&1 | head -2; getenforce; \
+ls -l /dev/block | head -12; echo '--- ip addr'; ip -o addr; echo '--- ip route'; ip route; \
+echo '--- props'; getprop | grep -E 'eth|dns|netd|net\\.'; echo '--- init rc'; \
+grep -n -B1 -A6 eth0 /vendor/etc/init/init.cutf_cvm.rc; echo '--- connect 1.1.1.1:80'; \
+printf 'GET / HTTP/1.0\\r\\n\\r\\n' | timeout 10 toybox nc -w 5 1.1.1.1 80 | head -3; \
+echo '--- end'; } </dev/null 2>&1 | sed 's/^/NETDIAG /') &\n";
+
+/// Отдаёт `script` shell на консоли гостя через [`GUEST_SETUP_DELAY`].
+fn spawn_guest_setup(console: ConsoleHandle, script: String) -> std::io::Result<()> {
+    std::thread::Builder::new()
+        .name("guest-setup".into())
+        .spawn(move || {
+            std::thread::sleep(GUEST_SETUP_DELAY);
+            console.push(script.as_bytes());
+        })?;
+    Ok(())
+}
+
+fn run_vm(
+    cfg: &VmConfig,
+    mut devices: VmDevices,
+    vm: &VmArgs,
+    console: ConsoleKind,
+    guest_setup: Option<String>,
+) -> Result<()> {
     let out = open_log(vm.serial_log.as_ref())?;
     if console == ConsoleKind::Hvc {
         devices.console = Some((Box::new(out.clone()), Arc::new(ConsoleInput::default())));
+    }
+    if vm.net == NetMode::User {
+        devices.net = Some(crate::hostnet::user_net()?);
     }
     let display = vm
         .display
@@ -216,18 +354,28 @@ fn run_vm(cfg: &VmConfig, mut devices: VmDevices, vm: &VmArgs, console: ConsoleK
         .map(DisplaySpec::parse)
         .transpose()
         .map_err(anyhow::Error::msg)?;
-    let screen = display.map(|d| display::attach(&mut devices, d));
+    let screen = display
+        .map(|d| display::attach(&mut devices, d, vm.gpu))
+        .transpose()?;
 
     let machine = Vm::new(cfg, devices, Box::new(out)).context("не удалось создать ВМ")?;
     tracing::info!(cmdline = machine.cmdline(), "командная строка ядра");
     tracing::info!("Консоль гостя ниже. Выход: Ctrl+A, затем X (или закройте окно).");
 
+    if let (Some(script), Some(h)) = (guest_setup, machine.console()) {
+        spawn_guest_setup(h, script).context("не удалось запустить настройку гостя")?;
+    }
     let target = match (console, machine.console()) {
         (ConsoleKind::Hvc, Some(h)) => InputTarget::Hvc(h),
         _ => InputTarget::Serial(machine.serial()),
     };
     let raw = RawConsole::enable();
-    spawn_input(target, machine.stopper()).context("не удалось запустить поток ввода")?;
+    spawn_input(
+        target,
+        machine.stopper(),
+        Duration::from_secs(vm.console_input_delay),
+    )
+    .context("не удалось запустить поток ввода")?;
     if vm.timeout > 0 {
         spawn_timeout(vm.timeout, machine.stopper()).context("не удалось запустить таймер")?;
     }
@@ -279,7 +427,7 @@ pub(crate) fn boot(args: &BootArgs) -> Result<()> {
             open_disk(&spec)?,
         ));
     }
-    run_vm(&cfg, devices, &args.vm, args.vm.console)
+    run_vm(&cfg, devices, &args.vm, args.vm.console, None)
 }
 
 fn read(path: &Path) -> Result<Vec<u8>> {
@@ -355,8 +503,9 @@ pub(crate) fn boot_android(args: &AndroidArgs) -> Result<()> {
     let mut bootconfig =
         rustdroid_bootconfig(&vendor_img.bootconfig, "pci0000:00/0000:00:01.0", "hvc0");
     if let Some(spec) = args.vm.display.as_deref() {
-        // Программный рендер в госте (SwiftShader/ANGLE) и композитор через DRM virtio-gpu.
-        for (k, v) in display::GUEST_SWIFTSHADER {
+        // Графика гостя: программный рендер (SwiftShader/ANGLE), gfxstream (ANGLE поверх
+        // Vulkan хоста) или gfxstream на OpenGL хоста; композитор — через DRM virtio-gpu.
+        for (k, v) in display::guest_bootconfig(args.vm.gpu) {
             bootconfig.set(k, v);
         }
         // Частота vsync композитора ranchu — частота дисплея гостя.
@@ -424,13 +573,46 @@ pub(crate) fn boot_android(args: &AndroidArgs) -> Result<()> {
         })
         .collect();
 
+    // Служба агента гостя на vsock: активное приложение и установка APK (этап 5).
+    let outbox = VsockOutbox::new();
+    let (agent, _agent_host) = rustdroid_devices::agent::new(Arc::clone(&outbox));
     let devices = VmDevices {
         disks: vec![("android".into(), Arc::new(disk))],
         extra_consoles,
         vsock_cid: Some(GUEST_CID),
+        vsock_services: vec![(rustdroid_devices::agent::AGENT_PORT, Box::new(agent))],
+        vsock_outbox: Some(outbox),
         ..VmDevices::default()
     };
-    run_vm(&cfg, devices, &args.vm, ConsoleKind::Hvc)
+    // В окне: экран Android не гаснет (см. ANDROID_WINDOW_SETUP).
+    let agent_script = match &args.vm.agent {
+        Some(path) => {
+            let bin = std::fs::read(path)
+                .with_context(|| format!("не удалось прочитать агент {}", path.display()))?;
+            tracing::info!(
+                bytes = bin.len(),
+                "агент гостя будет доставлен через консоль"
+            );
+            Some(crate::agent_push::push_script(&bin))
+        }
+        None => None,
+    };
+    let setup = (args.vm.display.is_some() || agent_script.is_some()).then(|| {
+        let mut script = if args.vm.display.is_some() {
+            ANDROID_WINDOW_SETUP.to_owned()
+        } else {
+            String::new()
+        };
+        if args.vm.net == NetMode::User {
+            script.push_str(NET_FIX);
+            script.push_str(NET_DIAG);
+        }
+        if let Some(agent) = &agent_script {
+            script.push_str(agent);
+        }
+        script
+    });
+    run_vm(&cfg, devices, &args.vm, ConsoleKind::Hvc, setup)
 }
 
 /// Число консолей virtio у Cuttlefish: hvc0…hvc19.

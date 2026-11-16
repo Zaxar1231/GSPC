@@ -2,6 +2,7 @@
 
 use std::time::Instant;
 
+use rustdroid_telemetry::threads::{GroupLoad, ThreadSample, group_load};
 use rustdroid_telemetry::usage::{Usage, UsageSample};
 use windows::Win32::Foundation::FILETIME;
 use windows::Win32::System::ProcessStatus::{GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS};
@@ -102,4 +103,111 @@ impl UsageMeter {
             guest_runtime: self.guest.as_mut().and_then(|g| (g.0)()),
         })
     }
+}
+
+/// Загрузка CPU по группам потоков процесса (см. [`rustdroid_telemetry::threads`]).
+#[derive(Debug)]
+pub struct ThreadMeter {
+    started: Instant,
+    cpus: u32,
+    prev: Option<(u64, Vec<ThreadSample>)>,
+}
+
+impl ThreadMeter {
+    /// Новый измеритель.
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            started: Instant::now(),
+            cpus: std::thread::available_parallelism()
+                .map_or(1, |n| u32::try_from(n.get()).unwrap_or(u32::MAX)),
+            prev: None,
+        }
+    }
+
+    /// Снимок потоков и загрузка групп с прошлого вызова (первый вызов — пусто).
+    pub fn update(&mut self) -> Vec<GroupLoad> {
+        #[allow(
+            clippy::cast_possible_truncation,
+            reason = "100 нс за сотни лет влезут в u64"
+        )]
+        let wall = (self.started.elapsed().as_nanos() / 100) as u64;
+        let now = thread_samples();
+        let loads = match &self.prev {
+            Some((w, prev)) => group_load(prev, &now, wall.saturating_sub(*w), self.cpus),
+            None => Vec::new(),
+        };
+        self.prev = Some((wall, now));
+        loads
+    }
+}
+
+impl Default for ThreadMeter {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Потоки текущего процесса: имя и время CPU. Недоступные потоки пропускаются.
+fn thread_samples() -> Vec<ThreadSample> {
+    use windows::Win32::Foundation::{CloseHandle, HLOCAL, LocalFree};
+    use windows::Win32::System::Diagnostics::ToolHelp::{
+        CreateToolhelp32Snapshot, TH32CS_SNAPTHREAD, THREADENTRY32, Thread32First, Thread32Next,
+    };
+    use windows::Win32::System::Threading::{
+        GetCurrentProcessId, GetThreadDescription, GetThreadTimes, OpenThread,
+        THREAD_QUERY_LIMITED_INFORMATION,
+    };
+
+    let mut out = Vec::new();
+    // SAFETY: снимок всех потоков системы; дескриптор закрывается ниже.
+    let Ok(snap) = (unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0) }) else {
+        return out;
+    };
+    // SAFETY: без параметров.
+    let pid = unsafe { GetCurrentProcessId() };
+    #[allow(clippy::cast_possible_truncation, reason = "размер структуры")]
+    let mut entry = THREADENTRY32 {
+        dwSize: size_of::<THREADENTRY32>() as u32,
+        ..Default::default()
+    };
+    // SAFETY: дескриптор снимка валиден, `entry` с заполненным dwSize.
+    let mut more = unsafe { Thread32First(snap, &raw mut entry) }.is_ok();
+    while more {
+        if entry.th32OwnerProcessID == pid {
+            let id = entry.th32ThreadID;
+            // SAFETY: поток своего процесса, только чтение сведений; дескриптор закрывается ниже.
+            if let Ok(h) = unsafe { OpenThread(THREAD_QUERY_LIMITED_INFORMATION, false, id) } {
+                let (mut c, mut e, mut k, mut u) = Default::default();
+                // SAFETY: дескриптор открыт выше, выходные структуры локальные.
+                let times =
+                    unsafe { GetThreadTimes(h, &raw mut c, &raw mut e, &raw mut k, &raw mut u) };
+                // SAFETY: дескриптор открыт выше; строку выделяет система, освобождается LocalFree.
+                let name = match unsafe { GetThreadDescription(h) } {
+                    Ok(p) if !p.is_null() => {
+                        // SAFETY: система вернула строку с нулём в конце.
+                        let s = unsafe { p.to_string() }.unwrap_or_default();
+                        // SAFETY: память строки выделена системой через LocalAlloc.
+                        let _ = unsafe { LocalFree(Some(HLOCAL(p.0.cast()))) };
+                        s
+                    }
+                    _ => String::new(),
+                };
+                // SAFETY: дескриптор открыт выше и закрывается один раз.
+                let _ = unsafe { CloseHandle(h) };
+                if times.is_ok() {
+                    out.push(ThreadSample {
+                        id,
+                        name,
+                        cpu: ticks(k) + ticks(u),
+                    });
+                }
+            }
+        }
+        // SAFETY: как для Thread32First.
+        more = unsafe { Thread32Next(snap, &raw mut entry) }.is_ok();
+    }
+    // SAFETY: дескриптор снимка закрывается один раз.
+    let _ = unsafe { CloseHandle(snap) };
+    out
 }

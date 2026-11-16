@@ -7,10 +7,12 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use rustdroid_devices::{
-    CmosRtc, ConsoleInput, Disk, InputEvent, InputEvents, InputKind, Serial16550, VirtioBlk,
-    VirtioConsole, VirtioInput, VirtioVsock,
+    CmosRtc, ConsoleInput, Disk, InputEvent, InputEvents, InputKind, NetBackend, NetWake,
+    Serial16550, VirtioBlk, VirtioConsole, VirtioInput, VirtioNet, VirtioVsock, VsockOutbox,
+    VsockService,
 };
-use rustdroid_gpu::{DisplayMode, Mailbox, VirtioGpu};
+use rustdroid_gpu::backend::ShmMapper;
+use rustdroid_gpu::{Backend3d, DisplayMode, FenceSink, Mailbox, VirtioGpu};
 use rustdroid_virtio::{GuestMemory, MsiMessage, MsiSink, VirtioPci};
 use rustdroid_whpx::sys::{
     WHV_INTERNAL_ACTIVITY_REGISTER, WHV_REGISTER_NAME, WHV_X64_SEGMENT_REGISTER,
@@ -84,10 +86,18 @@ pub struct VmDevices {
     pub extra_consoles: Vec<(String, Box<dyn Write + Send>, Arc<ConsoleInput>)>,
     /// virtio-vsock с указанным CID гостя.
     pub vsock_cid: Option<u64>,
+    /// Службы хоста на портах vsock (порт хоста, служба). К остальным портам хост «чёрная дыра».
+    pub vsock_services: Vec<(u32, Box<dyn VsockService>)>,
+    /// Ящик исходящих данных служб vsock (его будильник связывается с очередью приёма).
+    pub vsock_outbox: Option<Arc<VsockOutbox>>,
     /// virtio-gpu: режим дисплея и ящик кадров для композитора.
     pub gpu: Option<(DisplayMode, Arc<Mailbox>)>,
+    /// 3D для virtio-gpu: бэкенд (gfxstream) и приёмник его фенсов. Без него — только 2D.
+    pub gpu_3d: Option<(Box<dyn Backend3d>, Arc<FenceSink>)>,
     /// virtio-input: вид устройства, имя и очередь событий.
     pub inputs: Vec<(InputKind, String, Arc<InputEvents>)>,
+    /// virtio-net: сетевой бэкенд и его будильник очереди приёма. Без него сетевой карты нет.
+    pub net: Option<(Box<dyn NetBackend>, Arc<NetWake>)>,
 }
 
 impl std::fmt::Debug for VmDevices {
@@ -106,6 +116,7 @@ impl std::fmt::Debug for VmDevices {
             .field("vsock_cid", &self.vsock_cid)
             .field("gpu", &self.gpu.as_ref().map(|(m, _)| *m))
             .field("inputs", &self.inputs.len())
+            .field("net", &self.net.is_some())
             .finish()
     }
 }
@@ -166,6 +177,51 @@ impl ExitStats {
 }
 
 /// Доставка прерываний (IOAPIC и MSI-X) в LAPIC гипервизора.
+/// Размер области общей памяти virtio-gpu (host-visible blob Vulkan гостя).
+const GPU_SHM_SIZE: u64 = 4 << 30;
+
+/// Отображение blob gfxstream в BAR2 virtio-gpu через `WHvMapGpaRange`.
+///
+/// База BAR2 назначается при добавлении устройства на шину, после создания устройства, поэтому
+/// хранится в общей ячейке. Если гость перенесёт BAR2 (ядро так не делает, пока BAR лежит в
+/// окне `_CRS`), отображения останутся по старому адресу.
+struct WhpxShm {
+    partition: Arc<Partition>,
+    base: Arc<std::sync::atomic::AtomicU64>,
+}
+
+impl ShmMapper for WhpxShm {
+    unsafe fn map(
+        &self,
+        offset: u64,
+        host: std::ptr::NonNull<u8>,
+        len: u64,
+    ) -> std::result::Result<(), String> {
+        let base = self.base.load(Ordering::Acquire);
+        if base == 0 {
+            return Err("BAR2 не назначен".into());
+        }
+        // SAFETY: память [host, host + len) выделена бэкендом и живёт до `unmap` (контракт
+        // ShmMapper::map); партиция жива, пока жив этот объект.
+        unsafe {
+            self.partition.map_gpa_range(
+                host.as_ptr(),
+                base + offset,
+                len,
+                MapFlags::READ.union(MapFlags::WRITE),
+            )
+        }
+        .map_err(|e| e.to_string())
+    }
+
+    fn unmap(&self, offset: u64, len: u64) {
+        let base = self.base.load(Ordering::Acquire);
+        if let Err(e) = self.partition.unmap_gpa_range(base + offset, len) {
+            tracing::warn!(offset, len, error = %e, "WHvUnmapGpaRange для blob");
+        }
+    }
+}
+
 struct WhpxSink(Arc<Partition>);
 
 impl WhpxSink {
@@ -347,7 +403,7 @@ impl Vm {
     /// Гипервизор недоступен, файлы не читаются, образ некорректен или не хватает памяти.
     pub fn new(
         cfg: &VmConfig,
-        devices: VmDevices,
+        mut devices: VmDevices,
         serial_out: Box<dyn Write + Send>,
     ) -> Result<Self> {
         caps::ensure_available()?;
@@ -387,7 +443,13 @@ impl Vm {
         let size = cfg
             .memory_mib
             .checked_mul(1 << 20)
-            .ok_or_else(|| Error::Config("слишком много RAM".into()))?;
+            .filter(|&s| s <= crate::layout::MAX_RAM)
+            .ok_or_else(|| {
+                Error::Config(format!(
+                    "слишком много RAM: не больше {} МиБ",
+                    crate::layout::MAX_RAM >> 20
+                ))
+            })?;
         let ram = Arc::new(GuestRam::new(
             size,
             AllocOptions {
@@ -425,12 +487,15 @@ impl Vm {
             let bar = pci
                 .allocate_bar()
                 .ok_or_else(|| Error::Config("исчерпано окно MMIO PCI".into()))?;
-            let f: SharedFunction = Arc::new(Mutex::new(VirtioPci::new(
-                dev,
-                bar,
-                Arc::clone(&mem),
-                Arc::clone(&msi),
-            )));
+            let mut function = VirtioPci::new(dev, bar, Arc::clone(&mem), Arc::clone(&msi));
+            if let Some(len) = function.shm_size() {
+                let base = pci
+                    .allocate_bar64(len)
+                    .ok_or_else(|| Error::Config("исчерпано окно 64-битных BAR PCI".into()))?;
+                function.set_shm_base(base);
+                tracing::info!(device = %name, base = format_args!("0x{base:x}"), mib = len >> 20, "общая память устройства (BAR2)");
+            }
+            let f: SharedFunction = Arc::new(Mutex::new(function));
             let slot = pci
                 .add(Arc::clone(&f))
                 .ok_or_else(|| Error::Config("на шине PCI нет свободных слотов".into()))?;
@@ -456,8 +521,30 @@ impl Vm {
         for (name, out, input) in devices.extra_consoles {
             add(name, Box::new(VirtioConsole::new(out, input)))?;
         }
+        let mut gpu_fences = None;
         if let Some((mode, mailbox)) = devices.gpu {
-            add("gpu".into(), Box::new(VirtioGpu::new(mode, mailbox)))?;
+            match devices.gpu_3d {
+                Some((backend, fences)) => {
+                    let base = Arc::new(std::sync::atomic::AtomicU64::new(0));
+                    let mapper = Arc::new(WhpxShm {
+                        partition: Arc::clone(&partition),
+                        base: Arc::clone(&base),
+                    });
+                    let dev = VirtioGpu::with_3d(mode, mailbox, backend, Arc::clone(&fences))
+                        .with_shm(GPU_SHM_SIZE, mapper);
+                    let f = add("gpu".into(), Box::new(dev))?;
+                    let shm = f
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .shm_base();
+                    base.store(shm, Ordering::Release);
+                    gpu_fences = Some(fences);
+                    tracing::info!("virtio-gpu с 3D (gfxstream)");
+                }
+                None => {
+                    add("gpu".into(), Box::new(VirtioGpu::new(mode, mailbox)))?;
+                }
+            }
         }
         let mut inputs = Vec::new();
         for (i, (kind, name, events)) in devices.inputs.into_iter().enumerate() {
@@ -470,8 +557,25 @@ impl Vm {
                 function: f,
             });
         }
+        let vsock_outbox = devices.vsock_outbox.clone();
         if let Some(cid) = devices.vsock_cid {
-            add("vsock".into(), Box::new(VirtioVsock::new(cid)))?;
+            let mut dev = VirtioVsock::new(cid);
+            if let Some(outbox) = &devices.vsock_outbox {
+                dev = dev.with_services(
+                    std::mem::take(&mut devices.vsock_services),
+                    Arc::clone(outbox),
+                );
+            }
+            add("vsock".into(), Box::new(dev))?;
+        }
+        let mut net_wake = None;
+        if let Some((backend, wake)) = devices.net {
+            add(
+                "net".into(),
+                Box::new(VirtioNet::new(backend, rustdroid_devices::net::DEFAULT_MAC)),
+            )?;
+            net_wake = Some(wake);
+            tracing::info!("virtio-net (NAT в пользовательском режиме)");
         }
         let pci = Arc::new(pci);
 
@@ -514,10 +618,29 @@ impl Vm {
         ));
         let serial = Arc::new(Mutex::new(Serial16550::new(line, serial_out)));
 
-        let workers = named
-            .into_iter()
-            .map(|(name, f)| DeviceWorker::spawn(&name, Arc::clone(&partition), f))
-            .collect::<Result<Vec<_>>>()?;
+        let mut workers = Vec::with_capacity(named.len());
+        for (name, f) in named {
+            let w = DeviceWorker::spawn(&name, Arc::clone(&partition), f)?;
+            if name == "gpu"
+                && let Some(fences) = &gpu_fences
+            {
+                // Фенсы gfxstream будят обработку очереди управления virtio-gpu.
+                fences.set_waker(w.kicker(rustdroid_gpu::device::CONTROL_QUEUE));
+            }
+            if name == "vsock"
+                && let Some(outbox) = &vsock_outbox
+            {
+                // Исходящие данные служб будят очередь приёма vsock.
+                outbox.set_waker(w.kicker(rustdroid_devices::vsock::RX_QUEUE));
+            }
+            if name == "net"
+                && let Some(wake) = &net_wake
+            {
+                // Кадры от NAT будят очередь приёма.
+                wake.set_waker(w.kicker(rustdroid_devices::net::RX_QUEUE));
+            }
+            workers.push(w);
+        }
 
         Ok(Self {
             _workers: workers,
@@ -629,7 +752,7 @@ impl Vm {
                     std::thread::Builder::new()
                         .name(format!("vcpu{}", vcpu.index()))
                         .spawn_scoped(scope, move || {
-                            let _tuning = crate::host::tune_current_thread("Games");
+                            let _tuning = crate::host::tune_current_thread(None);
                             let r = run_loop(&mut vcpu, &mut bus, events, stop, cpuid);
                             stopper.stop();
                             r
@@ -638,7 +761,7 @@ impl Vm {
                 .collect();
             let mut results = Vec::new();
             if let Some(mut vcpu) = bsp {
-                let _tuning = crate::host::tune_current_thread("Games");
+                let _tuning = crate::host::tune_current_thread(None);
                 let mut bus = self.bus();
                 results.push(run_loop(
                     &mut vcpu,

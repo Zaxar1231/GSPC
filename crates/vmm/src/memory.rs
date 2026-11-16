@@ -362,6 +362,11 @@ impl rustdroid_virtio::GuestMemory for GuestRam {
             len: buf.len(),
         })
     }
+
+    fn host_range(&self, gpa: u64, len: usize) -> Option<NonNull<u8>> {
+        let off = self.translate(gpa, len)?;
+        NonNull::new(self.host_at(off))
+    }
 }
 
 #[cfg(test)]
@@ -389,6 +394,18 @@ mod tests {
         assert!(ram.write(64 * MIB, &[1]).is_err());
         assert!(ram.read(u64::MAX - 2, &mut buf).is_err());
         assert_eq!(ram.low_end(), 64 * MIB);
+    }
+
+    #[test]
+    fn host_range_points_into_guest_ram() {
+        use rustdroid_virtio::GuestMemory as _;
+        let ram = GuestRam::new(64 * MIB, AllocOptions::default()).unwrap();
+        ram.write(0x2000, b"gfx").unwrap();
+        let p = ram.host_range(0x2000, 3).unwrap();
+        // SAFETY: host_range проверил, что 3 байта лежат внутри RAM.
+        let bytes = unsafe { std::slice::from_raw_parts(p.as_ptr(), 3) };
+        assert_eq!(bytes, b"gfx");
+        assert!(ram.host_range(64 * MIB - 2, 4).is_none());
     }
 
     #[test]

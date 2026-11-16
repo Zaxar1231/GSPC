@@ -1,0 +1,24 @@
+diff --git a/host/vulkan/vk_decoder_global_state.cpp b/host/vulkan/vk_decoder_global_state.cpp
+index 65a59e9..a280809 100644
+--- a/host/vulkan/vk_decoder_global_state.cpp
++++ b/host/vulkan/vk_decoder_global_state.cpp
+@@ -2425,6 +2425,19 @@ class VkDecoderGlobalState::Impl {
+             allowedDeviceExtensions.erase(VK_KHR_SHADER_FLOAT_CONTROLS_2_EXTENSION_NAME);
+         }
+ 
++        // RustDroid: on a pre-1.3 host driver (e.g. Intel UHD 27.20.100.x) the guest driver
++        // still emits the core-1.3 opcodes for extended dynamic state, which the decoder
++        // forwards to the driver's EXT entry points; the Intel driver crashes inside
++        // vkCmdBindVertexBuffers2EXT. ANGLE works without these extensions, so hide them.
++        {
++            VkPhysicalDeviceProperties hostProps = {};
++            vk->vkGetPhysicalDeviceProperties(physicalDevice, &hostProps);
++            if (hostProps.apiVersion < VK_API_VERSION_1_3) {
++                allowedDeviceExtensions.erase(VK_EXT_EXTENDED_DYNAMIC_STATE_EXTENSION_NAME);
++                allowedDeviceExtensions.erase(VK_EXT_EXTENDED_DYNAMIC_STATE_2_EXTENSION_NAME);
++            }
++        }
++
+         properties.erase(
+             std::remove_if(properties.begin(), properties.end(),
+                            [&](const VkExtensionProperties& extension) {
