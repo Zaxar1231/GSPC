@@ -50,6 +50,10 @@
     Этап 3 без сетевой карты (по умолчанию у гостя virtio-net с NAT в пользовательском режиме,
     --net user). В отчёт попадает диагностика сети гостя (stage3-net.txt).
 
+.PARAMETER Agent
+    Этап 3 с гостевым агентом: rustdroid-agent из pre-release deps-agent доставляется в гость
+    через консоль; проверяется, что он подключился к хосту и сообщает активное приложение.
+
 .PARAMETER KeepInstance
     Этап 3 без сброса инстанса: повторный запуск Android с сохранёнными данными и кэшами
     шейдеров (проверка статтеров при повторном запуске). По умолчанию инстанс сбрасывается.
@@ -73,6 +77,7 @@ param(
     [switch]$KeepInstance,
     [switch]$NoUpload,
     [switch]$NoNet,
+    [switch]$Agent,
     [string]$Append = '',
     [ValidateSet('auto', 'gfxstream', 'gfxstream-gl', 'software')]
     [string]$Gpu = 'auto',
@@ -470,6 +475,22 @@ if (Test-Path $Exe) {
     } catch {
         Warn "Не удалось скачать ANGLE ($_): уровень графики 2 (без Vulkan) будет недоступен"
     }
+    # Гостевой агент (x86_64 Android) — доставляется в гость через консоль (--agent).
+    if ($Agent) {
+        $script:AgentPath = Join-Path $Work 'rustdroid-agent'
+        try {
+            $base = "https://github.com/$Owner/$RepoName/releases/download/deps-agent"
+            Download "$base/rustdroid-agent.sha256" "$script:AgentPath.sha256"
+            Download "$base/rustdroid-agent" $script:AgentPath
+            $want = ((Get-Content "$script:AgentPath.sha256" -Raw).Trim() -split '\s+')[0].ToLower()
+            $have = (Get-FileHash -Algorithm SHA256 $script:AgentPath).Hash.ToLower()
+            if ($have -ne $want) { throw "sha256 не совпал: $have" }
+            Ok "гостевой агент: rustdroid-agent ($((Get-Item $script:AgentPath).Length) Б)"
+        } catch {
+            Warn "Не удалось скачать гостевой агент ($_): этап 3 пройдёт без него"
+            $script:AgentPath = $null
+        }
+    }
 }
 
 if (Test-Path $Exe) {
@@ -659,6 +680,7 @@ if ($Stages -contains 3 -and $images -and (Test-Path $Exe)) {
         "stage3 append: $Append" | Add-Content -Path (Join-Path $Out 'system.txt') -Encoding UTF8
     }
     if (-not $NoNet) { $stage3Args += @('--net', 'user') }
+    if ($script:AgentPath) { $stage3Args += @('--agent', $script:AgentPath) }
     if ($KeepInstance) { "stage3 instance: kept" | Add-Content -Path (Join-Path $Out 'system.txt') -Encoding UTF8 }
     # Профиль гостя: после загрузки shell на консоли раз в 10 с печатает top (строки с «TOP »).
     $guestTop = 'while [ "$(getprop sys.boot_completed)" != 1 ]; do sleep 5; done; sleep 15; ' +
@@ -706,6 +728,12 @@ if ($Stages -contains 3 -and $images -and (Test-Path $Exe)) {
             -Pattern 'DHCP: гостю выдан адрес' -SimpleMatch -Encoding UTF8 -ErrorAction SilentlyContinue
         if ($dhcp) { Ok 'stage3: гость получил адрес по DHCP (сеть virtio-net работает)' }
         else { Warn 'stage3: гость не запрашивал DHCP — Android не использует сетевую карту' }
+        # Android сам проверяет интернет (generate_204); VALIDATED — проверка прошла.
+        if (Select-String -Path (Join-Path $Out 'stage3-logcat.txt') -Pattern 'Transports: ETHERNET.*VALIDATED' -Encoding UTF8 -Quiet -ErrorAction SilentlyContinue) {
+            Ok 'stage3: интернет в госте есть (Android: сеть VALIDATED)'
+        } else {
+            Warn 'stage3: Android не подтвердил интернет (нет VALIDATED)'
+        }
         $netdiag = Select-String -Path $serial -Pattern 'NETDIAG ' -SimpleMatch -Encoding UTF8 -ErrorAction SilentlyContinue
         if ($netdiag) {
             $netdiag | ForEach-Object { $_.Line -replace '^.*?NETDIAG ', '' } |
@@ -714,6 +742,19 @@ if ($Stages -contains 3 -and $images -and (Test-Path $Exe)) {
         } else {
             Warn 'stage3: нет диагностики сети из консоли гостя'
         }
+    }
+    if ($script:AgentPath) {
+        $logs = (Join-Path $Out 'stage3-stderr.log'), (Join-Path $Out 'stage3-stdout.log')
+        if (Select-String -Path $logs -Pattern 'агент гостя подключён' -SimpleMatch -Encoding UTF8 -Quiet -ErrorAction SilentlyContinue) {
+            Ok 'stage3: гостевой агент подключился к хосту (vsock)'
+        } elseif (Select-String -Path $serial -Pattern 'rustdroid: agent started' -SimpleMatch -Quiet -ErrorAction SilentlyContinue) {
+            Warn 'stage3: агент запущен в госте, но не подключился к хосту'
+        } else {
+            Warn 'stage3: агент не доставлен в гость (нет «rustdroid: agent started»)'
+        }
+        $fg = Select-String -Path $logs -Pattern 'активное приложение гостя' -SimpleMatch -Encoding UTF8 -ErrorAction SilentlyContinue
+        if ($fg) { Ok "stage3: агент сообщает активное приложение ($(@($fg).Count) раз)" }
+        else { Warn 'stage3: агент не сообщил активное приложение' }
     }
     # Профиль: загрузка CPU по потокам и время команд virtio-gpu (раз в 10 с).
     $perf = Select-String -Path (Join-Path $Out 'stage3-stderr.log'), (Join-Path $Out 'stage3-stdout.log') `
@@ -827,7 +868,10 @@ function Send-Report([string]$Zip) {
     $bodyFile = Join-Path $Work 'issue-body.md'
     # UTF-8 без BOM: иначе BOM попадёт в начало текста issue.
     [IO.File]::WriteAllLines($bodyFile, [string[]]$body, (New-Object Text.UTF8Encoding $false))
-    $title = "hw-test: $cpuName, $commit, $Stamp"
+    $warns = @($Summary | Where-Object { $_ -like 'WARN*' -or $_ -like 'FAIL*' }).Count
+    $state = if ($warns -eq 0) { 'всё OK' } else { "$warns WARN" }
+    $who = if ($Yes) { 'hw-test (авто)' } else { 'hw-test' }
+    $title = "${who}: $cpuName, $commit, $state, $Stamp"
     $issue = (& gh issue create -R $repo --title $title --body-file $bodyFile | Select-Object -Last 1)
     if ($LASTEXITCODE -ne 0) { Say 'Архив загружен, но issue не создано.' 'Yellow'; return $false }
     Say "Отчёт отправлен: $issue" 'Green'

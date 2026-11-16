@@ -78,6 +78,25 @@ powershell -ExecutionPolicy Bypass -File scripts\hw-test.ps1 -FromSource -SkipBu
 - `stage3-shot-NN.png` — скриншоты окна RustDroid (только окна, не всего экрана);
 - `stage3-answers.txt` — ваши ответы.
 
+## Бот: автоматическая проверка новых сборок
+
+`scripts/hw-bot.ps1` сам гоняет `hw-test.ps1` на каждой новой nightly-сборке (pre-release
+`nightly-<ветка>`, обновлённые за неделю) без участия человека: `-Yes`, сеть и гостевой агент
+(`-Agent`), этап 3 — 7 минут. Отчёт уходит в issue с заголовком
+`hw-test (авто): <CPU>, <коммит>, всё OK | N WARN, <время>`. Проверенные коммиты бот помнит
+(`%LOCALAPPDATA%\RustDroid\hw-bot\tested.txt`) и второй раз не гоняет; журнал — `hw-bot.log`
+там же.
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\hw-bot.ps1 -Install    # раз в 2 ч (-EveryHours N)
+powershell -ExecutionPolicy Bypass -File scripts\hw-bot.ps1             # один прогон сейчас
+powershell -ExecutionPolicy Bypass -File scripts\hw-bot.ps1 -Uninstall
+```
+
+Бот не запускается от батареи и когда RustDroid уже открыт; окно Android на время проверки
+появляется на экране. Касания, FPS при прокрутке и «замирание» бот не проверяет — только то,
+что видно по логам: загрузка, кадры, пульс, DHCP, интернет в госте (`VALIDATED`), агент.
+
 ## Образы гостя
 
 Скрипт берёт с ci.android.com последние удачные сборки:
