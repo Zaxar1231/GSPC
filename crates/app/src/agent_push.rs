@@ -40,8 +40,12 @@ pub(crate) fn base64(data: &[u8]) -> String {
 pub(crate) fn push_script(bin: &[u8]) -> String {
     let b64 = base64(bin);
     let tmp = format!("{GUEST_PATH}.b64");
-    let mut s =
-        String::from("while [ \"$(getprop sys.boot_completed)\" != 1 ]; do sleep 2; done\n");
+    // Без эха: терминал гостя повторяет каждую строку обратно в консоль, и ~1 МБ base64 шёл
+    // вдвое дольше (за 4 мин дошло 237 кусков из 327). Эхо выключается первой строкой — до
+    // прихода основного объёма в буфер терминала.
+    let mut s = String::from(
+        "stty -echo\nwhile [ \"$(getprop sys.boot_completed)\" != 1 ]; do sleep 2; done\n",
+    );
     s.push_str(&format!("rm -f {tmp}\n"));
     for part in b64.as_bytes().chunks(CHUNK) {
         // base64 — только ASCII, безопасно в одинарных кавычках.
@@ -53,7 +57,7 @@ pub(crate) fn push_script(bin: &[u8]) -> String {
          echo 'rustdroid: agent written' || echo 'rustdroid: agent write failed'\n"
     ));
     s.push_str(&format!(
-        "(nohup {GUEST_PATH} > {GUEST_PATH}.log 2>&1 &) ; echo 'rustdroid: agent started'\n"
+        "(nohup {GUEST_PATH} > {GUEST_PATH}.log 2>&1 &) ; echo 'rustdroid: agent started'; stty echo\n"
     ));
     s
 }
@@ -79,6 +83,7 @@ mod tests {
         let appends = script.matches(" >> ").count();
         assert_eq!(appends, base64(&bin).len().div_ceil(CHUNK));
         assert!(script.contains("chmod 755"));
-        assert!(script.trim_end().ends_with("'rustdroid: agent started'"));
+        assert!(script.starts_with("stty -echo\n"));
+        assert!(script.contains("'rustdroid: agent started'"));
     }
 }
