@@ -636,7 +636,14 @@ pub(crate) fn boot_android(args: &AndroidArgs) -> Result<()> {
         }
         script
     });
-    run_vm(&cfg, devices, &args.vm, ConsoleKind::Hvc, setup, Some(agent_host))
+    run_vm(
+        &cfg,
+        devices,
+        &args.vm,
+        ConsoleKind::Hvc,
+        setup,
+        Some(agent_host),
+    )
 }
 
 /// Ждёт подключения агента гостя и ставит APK по очереди; итог каждой установки — в лог.

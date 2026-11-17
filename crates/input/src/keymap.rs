@@ -181,7 +181,8 @@ impl Keymap {
     pub fn tick(&mut self, now_ms: u64, out: &mut Vec<TouchOp>) {
         self.timeline.sort_by_key(|t| t.at);
         let due = self.timeline.iter().take_while(|t| t.at <= now_ms).count();
-        for t in self.timeline.drain(..due).collect::<Vec<_>>() {
+        let rest = self.timeline.split_off(due);
+        for t in std::mem::replace(&mut self.timeline, rest) {
             if let (TouchOp::Up { slot }, true) = (t.op, t.release) {
                 self.free.push(slot);
             }
@@ -194,8 +195,9 @@ impl Keymap {
             if next > now_ms {
                 continue;
             }
-            let Some(Control::RepeatTap { x, y, interval_ms, .. }) =
-                self.profile.controls.get(i)
+            let Some(Control::RepeatTap {
+                x, y, interval_ms, ..
+            }) = self.profile.controls.get(i)
             else {
                 continue;
             };
@@ -432,7 +434,9 @@ impl Keymap {
                     self.plan_swipe(slot, *from, *to, u64::from(*duration_ms), now, out);
                 }
             }
-            Control::RepeatTap { x, y, interval_ms, .. } => match (pressed, state) {
+            Control::RepeatTap {
+                x, y, interval_ms, ..
+            } => match (pressed, state) {
                 (true, State::Idle) => {
                     if let Some(slot) = self.alloc() {
                         out.push(TouchOp::Down {
@@ -458,11 +462,7 @@ impl Keymap {
                 }
             }
             Control::MobaSkill {
-                key,
-                x,
-                y,
-                cancel,
-                ..
+                key, x, y, cancel, ..
             } => {
                 let is_key = key.eq_ignore_ascii_case(name);
                 match (is_key, pressed, state) {
@@ -680,7 +680,12 @@ impl Keymap {
             }
         }
         // Слот возвращается в пул после последнего касания (или сразу, если касаний нет).
-        match self.timeline.iter_mut().rev().find(|x| x.op == TouchOp::Up { slot }) {
+        match self
+            .timeline
+            .iter_mut()
+            .rev()
+            .find(|x| x.op == TouchOp::Up { slot })
+        {
             Some(last) => last.release = true,
             None => self.free.push(slot),
         }
@@ -782,7 +787,10 @@ mod tests {
             radius: 0.1,
         }]);
         // Радиус в долях высоты: по горизонтали на экране 2:1 — вдвое меньше.
-        same!(key(&mut k, "D", true, 0).1, [down(2, 0.2, 0.7), mv(2, 0.25, 0.7)]);
+        same!(
+            key(&mut k, "D", true, 0).1,
+            [down(2, 0.2, 0.7), mv(2, 0.25, 0.7)]
+        );
         let out = key(&mut k, "W", true, 10).1;
         let Some(TouchOp::Move { at, .. }) = out.first().copied() else {
             panic!("ожидалось движение");
@@ -843,7 +851,10 @@ mod tests {
         same!(key(&mut k, "Space", true, 1000).1, [down(2, 0.5, 0.8)]);
         assert_eq!(k.next_deadline(), Some(1016));
         same!(tick(&mut k, 1032), [mv(2, 0.5, 0.7), mv(2, 0.5, 0.6)]);
-        same!(tick(&mut k, 2000), [mv(2, 0.5, 0.5), mv(2, 0.5, 0.4), up(2)]);
+        same!(
+            tick(&mut k, 2000),
+            [mv(2, 0.5, 0.5), mv(2, 0.5, 0.4), up(2)]
+        );
         assert_eq!(k.next_deadline(), None);
         assert_eq!(k.free.len(), 8);
     }
@@ -890,7 +901,10 @@ mod tests {
             .iter()
             .filter(|o| matches!(o, TouchOp::Down { .. }))
             .count();
-        let ups = ops.iter().filter(|o| matches!(o, TouchOp::Up { .. })).count();
+        let ups = ops
+            .iter()
+            .filter(|o| matches!(o, TouchOp::Up { .. }))
+            .count();
         assert_eq!((downs, ups), (2, 2));
         // Пальцы разошлись: 0.1 + 0.05 * 2 = 0.2 высоты, по горизонтали на 2:1 — 0.1.
         let last = ops
@@ -940,7 +954,10 @@ mod tests {
         let mut out = Vec::new();
         k.handle(HostEvent::Cursor { x: 0.5, y: 0.9 }, 0, &mut out);
         // Курсор ниже центра на 0.4 (> 0.3) — полный радиус вниз.
-        same!(key(&mut k, "1", true, 10).1, [down(2, 0.8, 0.8), mv(2, 0.8, 0.9)]);
+        same!(
+            key(&mut k, "1", true, 10).1,
+            [down(2, 0.8, 0.8), mv(2, 0.8, 0.9)]
+        );
         let (used, out) = key(&mut k, "Escape", true, 20);
         assert!(used);
         same!(out, [mv(2, 0.9, 0.2), up(2)]);
