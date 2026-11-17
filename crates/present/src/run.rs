@@ -73,6 +73,9 @@ pub fn run(
     let _ = threads.update();
     let mut idle_gaps = 0_u32;
     let mut frames = 0_u32;
+    // Последний выведенный кадр (для перевывода с оверлеем, пока гость не шлёт новые).
+    let mut last: Option<Arc<rustdroid_gpu::Frame>> = None;
+    let mut last_overlay = Instant::now();
     let mut overlay = OverlayData {
         lines: Vec::with_capacity(6),
         frame_times_ms: Vec::with_capacity(256),
@@ -99,6 +102,19 @@ pub fn run(
             frames = 0;
         }
         let Some(frame) = mailbox.wait_after(seen, Duration::from_millis(100)) else {
+            // Экран гостя не меняется (Android не шлёт кадры): раз в секунду перевыводим
+            // последний кадр со свежим оверлеем, иначе цифры застывают и окно выглядит зависшим.
+            if cfg.overlay
+                && last_overlay.elapsed() >= IDLE_GAP
+                && let Some(prev) = &last
+            {
+                fill_overlay(&mut overlay, &mut stats, &mut latency, &usage, &times, true);
+                if let Err(e) = presenter.present(prev, Some(&overlay), cfg.mode) {
+                    tracing::error!(error = %e, "ошибка вывода кадра");
+                    break;
+                }
+                last_overlay = Instant::now();
+            }
             continue;
         };
         seen = frame.seq;
@@ -127,20 +143,7 @@ pub fn run(
         }
 
         let overlay_ref = if cfg.overlay {
-            overlay.lines.clear();
-            if let Some(s) = stats.summary() {
-                overlay.lines.push(format!("FPS {:.1}", s.avg_fps));
-                overlay
-                    .lines
-                    .push(format!("1% LOW {:.1}", s.low_1_percent_fps));
-                overlay.lines.push(format!("FT {:.2} MS", s.avg_frame_ms));
-            }
-            if let Some(l) = latency.summary() {
-                overlay.lines.push(format!("LAT {:.1} MS", l.avg_frame_ms));
-            }
-            overlay.lines.extend(usage.overlay_lines());
-            overlay.frame_times_ms.clear();
-            overlay.frame_times_ms.extend_from_slice(&times);
+            fill_overlay(&mut overlay, &mut stats, &mut latency, &usage, &times, false);
             Some(&overlay)
         } else {
             None
@@ -149,10 +152,41 @@ pub fn run(
             tracing::error!(error = %e, "ошибка вывода кадра");
             break;
         }
+        last_overlay = Instant::now();
         // Задержка от RESOURCE_FLUSH гостя до Present.
         latency.record(frame.flushed_at.elapsed());
-        mailbox.recycle(frame);
+        if let Some(old) = last.replace(frame) {
+            mailbox.recycle(old);
+        }
     }
+}
+
+/// Строки оверлея. `idle` — экран гостя не меняется: FPS 0 вместо застывшей статистики
+/// последних кадров.
+fn fill_overlay(
+    overlay: &mut OverlayData,
+    stats: &mut FrameStats,
+    latency: &mut FrameStats,
+    usage: &rustdroid_telemetry::usage::Usage,
+    times: &[f32],
+    idle: bool,
+) {
+    overlay.lines.clear();
+    if idle {
+        overlay.lines.push("FPS 0 STATIC".to_owned());
+    } else if let Some(s) = stats.summary() {
+        overlay.lines.push(format!("FPS {:.1}", s.avg_fps));
+        overlay
+            .lines
+            .push(format!("1% LOW {:.1}", s.low_1_percent_fps));
+        overlay.lines.push(format!("FT {:.2} MS", s.avg_frame_ms));
+    }
+    if let Some(l) = latency.summary() {
+        overlay.lines.push(format!("LAT {:.1} MS", l.avg_frame_ms));
+    }
+    overlay.lines.extend(usage.overlay_lines());
+    overlay.frame_times_ms.clear();
+    overlay.frame_times_ms.extend_from_slice(times);
 }
 
 /// Строки лога раз в [`LOG_EVERY`]: кадры (если за интервал они были; статистика — по
