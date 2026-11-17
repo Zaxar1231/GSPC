@@ -97,7 +97,9 @@ jobs:
           # Прошлый полный пакет канала — для дельты (в первый раз его нет).
           vpk download http --url $feed --channel $channel -o releases
           if ($LASTEXITCODE -ne 0) { Write-Host 'прошлых пакетов нет — только полный пакет' }
-          vpk pack --packId RustDroid --packVersion $v --packDir dist --mainExe rustdroid.exe `
+          # packId ≠ RustDroid: Velopack ставит в %LOCALAPPDATA%\<packId> и при удалении стирает
+          # эту папку целиком, а в %LOCALAPPDATA%\RustDroid лежат образы и инстансы.
+          vpk pack --packId RustDroidApp --packVersion $v --packDir dist --mainExe rustdroid.exe `
             --packTitle RustDroid --channel $channel -o releases
           if ($LASTEXITCODE -ne 0) { exit 1 }
           # Подпись фида ed25519 (ключ PEM из секрета).
@@ -114,7 +116,7 @@ jobs:
             gh release create updates --prerelease --title 'Обновления (Velopack)' `
               --notes 'Фиды и пакеты автообновления RustDroid. Устанавливать — Setup.exe из релиза версии.'
           }
-          $files = Get-ChildItem releases -File | Where-Object { $_.Name -like "RustDroid-$v-*" -or $_.Name -like "releases.$channel.json*" -or $_.Name -like 'assets.*.json' }
+          $files = Get-ChildItem releases -File | Where-Object { $_.Name -like "RustDroidApp-$v-*" -or $_.Name -like "releases.$channel.json*" -or $_.Name -like 'assets.*.json' }
           gh release upload updates @($files.FullName) --clobber
           if ($LASTEXITCODE -ne 0) { exit 1 }
           # Имя установщика у vpk зависит от канала (…-Setup.exe / …-beta-Setup.exe).

@@ -8,6 +8,18 @@
 
 ## [Unreleased]
 
+## [0.1.0-beta.1] - 2026-11-17
+
+Первая пробная beta: установщик и автообновление (этап 7).
+
+### Added
+
+- Установщик `RustDroid-0.1.0-beta.1-win-x64-Setup.exe` (Velopack, без прав администратора) и
+  автообновление из канала beta: `rustdroid update [--check | --rollback]`, фоновая загрузка при
+  запуске ВМ (`--no-auto-update` — без неё), фид обновлений подписан ed25519.
+- Откат новой версии, которая трижды подряд не проработала минуту.
+- `rustdroid enable-whpx` — включение Windows Hypervisor Platform (UAC только на этом шаге).
+
 ### Added (этап 6)
 
 - Профили управления (`.rdprofile`, формат v1) и keymap-движок: tap, joystick, aim (захват мыши),

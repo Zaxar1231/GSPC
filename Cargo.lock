@@ -850,7 +850,7 @@ dependencies = [
 
 [[package]]
 name = "rustdroid"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -872,11 +872,11 @@ dependencies = [
 
 [[package]]
 name = "rustdroid-bluestacks-import"
-version = "0.0.1"
+version = "0.1.0"
 
 [[package]]
 name = "rustdroid-devices"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "crc32fast",
  "rustdroid-guest-agent",
@@ -888,7 +888,7 @@ dependencies = [
 
 [[package]]
 name = "rustdroid-gfxstream"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "thiserror",
  "tracing",
@@ -897,7 +897,7 @@ dependencies = [
 
 [[package]]
 name = "rustdroid-gpu"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "rustdroid-gfxstream",
  "rustdroid-virtio",
@@ -907,18 +907,18 @@ dependencies = [
 
 [[package]]
 name = "rustdroid-guest-agent"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "libc",
 ]
 
 [[package]]
 name = "rustdroid-hostinput"
-version = "0.0.1"
+version = "0.1.0"
 
 [[package]]
 name = "rustdroid-input"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "criterion",
  "serde",
@@ -927,21 +927,21 @@ dependencies = [
 
 [[package]]
 name = "rustdroid-instance"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "thiserror",
 ]
 
 [[package]]
 name = "rustdroid-net"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "tracing",
 ]
 
 [[package]]
 name = "rustdroid-present"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "rustdroid-gpu",
  "rustdroid-telemetry",
@@ -952,14 +952,14 @@ dependencies = [
 
 [[package]]
 name = "rustdroid-telemetry"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "criterion",
 ]
 
 [[package]]
 name = "rustdroid-updater"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "ring",
  "serde_json",
@@ -969,7 +969,7 @@ dependencies = [
 
 [[package]]
 name = "rustdroid-virtio"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "thiserror",
  "tracing",
@@ -977,7 +977,7 @@ dependencies = [
 
 [[package]]
 name = "rustdroid-vmm"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "rustdroid-devices",
  "rustdroid-gpu",
@@ -990,7 +990,7 @@ dependencies = [
 
 [[package]]
 name = "rustdroid-whpx"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "thiserror",
  "tracing",
