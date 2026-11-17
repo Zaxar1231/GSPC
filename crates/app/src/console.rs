@@ -552,7 +552,7 @@ pub(crate) fn boot_android(args: &AndroidArgs) -> Result<()> {
         .with_context(|| format!("не удалось создать {}", logcat_path.display()))?;
     tracing::info!(path = %logcat_path.display(), "logcat гостя");
     let mut logcat = Some(logcat);
-    let extra_consoles = (1..CUTTLEFISH_CONSOLES)
+    let mut extra_consoles: Vec<_> = (1..CUTTLEFISH_CONSOLES)
         .map(|n| {
             let input = Arc::new(ConsoleInput::default());
             let out: Box<dyn Write + Send> = match n {
@@ -575,7 +575,38 @@ pub(crate) fn boot_android(args: &AndroidArgs) -> Result<()> {
 
     // Служба агента гостя на vsock: активное приложение и установка APK (этап 5).
     let outbox = VsockOutbox::new();
-    let (agent, _agent_host) = rustdroid_devices::agent::new(Arc::clone(&outbox));
+    let (agent, agent_host) = rustdroid_devices::agent::new(Arc::clone(&outbox));
+    if !args.vm.install.is_empty() {
+        let apks = args
+            .vm
+            .install
+            .iter()
+            .map(|p| {
+                let data = std::fs::read(p)
+                    .with_context(|| format!("не удалось прочитать APK {}", p.display()))?;
+                let name = p.file_name().unwrap_or_default().to_string_lossy().into_owned();
+                Ok((name, data))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        std::thread::Builder::new()
+            .name("agent-install".into())
+            .spawn(move || install_apks(&agent_host, &apks))?;
+    }
+    // Агент: бинарник — через отдельную консоль hvc20 (см. agent_push), команды — через hvc0.
+    let agent_script = match &args.vm.agent {
+        Some(path) => {
+            let bin = std::fs::read(path)
+                .with_context(|| format!("не удалось прочитать агент {}", path.display()))?;
+            tracing::info!(bytes = bin.len(), "агент гостя будет доставлен через hvc20");
+            let script = crate::agent_push::push_script(bin.len());
+            let input = Arc::new(ConsoleInput::default());
+            let out = crate::agent_push::AgentDrop::new(Arc::clone(&input), bin);
+            let name = format!("hvc{}", crate::agent_push::DROP_HVC);
+            extra_consoles.push((name, Box::new(out) as Box<dyn Write + Send>, input));
+            Some(script)
+        }
+        None => None,
+    };
     let devices = VmDevices {
         disks: vec![("android".into(), Arc::new(disk))],
         extra_consoles,
@@ -583,19 +614,6 @@ pub(crate) fn boot_android(args: &AndroidArgs) -> Result<()> {
         vsock_services: vec![(rustdroid_devices::agent::AGENT_PORT, Box::new(agent))],
         vsock_outbox: Some(outbox),
         ..VmDevices::default()
-    };
-    // В окне: экран Android не гаснет (см. ANDROID_WINDOW_SETUP).
-    let agent_script = match &args.vm.agent {
-        Some(path) => {
-            let bin = std::fs::read(path)
-                .with_context(|| format!("не удалось прочитать агент {}", path.display()))?;
-            tracing::info!(
-                bytes = bin.len(),
-                "агент гостя будет доставлен через консоль"
-            );
-            Some(crate::agent_push::push_script(&bin))
-        }
-        None => None,
     };
     let setup = (args.vm.display.is_some() || agent_script.is_some()).then(|| {
         let mut script = if args.vm.display.is_some() {
@@ -613,6 +631,24 @@ pub(crate) fn boot_android(args: &AndroidArgs) -> Result<()> {
         script
     });
     run_vm(&cfg, devices, &args.vm, ConsoleKind::Hvc, setup)
+}
+
+/// Ждёт подключения агента гостя и ставит APK по очереди; итог каждой установки — в лог.
+fn install_apks(host: &rustdroid_devices::agent::AgentHost, apks: &[(String, Vec<u8>)]) {
+    while !host.connected() {
+        std::thread::sleep(Duration::from_millis(500));
+    }
+    for (name, data) in apks {
+        let outcome = host.install(name, data).map_err(|e| e.to_string()).and_then(|rx| {
+            rx.recv_timeout(Duration::from_secs(300))
+                .map_err(|_| "нет ответа агента за 5 мин".to_owned())
+        });
+        match outcome {
+            Ok(o) if o.ok => tracing::info!(apk = %name, out = %o.message.trim(), "APK установлен"),
+            Ok(o) => tracing::warn!(apk = %name, out = %o.message.trim(), "APK не установлен"),
+            Err(e) => tracing::warn!(apk = %name, out = %e, "APK не установлен"),
+        }
+    }
 }
 
 /// Число консолей virtio у Cuttlefish: hvc0…hvc19.

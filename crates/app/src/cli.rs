@@ -125,6 +125,11 @@ pub(crate) struct VmArgs {
     #[arg(long)]
     pub agent: Option<std::path::PathBuf>,
 
+    /// APK для установки в гость через агента (`pm install -r`), когда агент подключится;
+    /// флаг можно повторять. Без агента в госте не действует.
+    #[arg(long)]
+    pub install: Vec<std::path::PathBuf>,
+
     /// Сеть гостя: `user` — virtio-net с NAT в пользовательском режиме (интернет через сеть
     /// хоста без драйверов и прав администратора), `none` — без сети.
     #[arg(long, value_enum, default_value_t = NetMode::None)]

@@ -54,6 +54,10 @@
     Этап 3 с гостевым агентом: rustdroid-agent из pre-release deps-agent доставляется в гость
     через консоль; проверяется, что он подключился к хосту и сообщает активное приложение.
 
+.PARAMETER Apk
+    С -Agent: APK, который хост ставит в гость через агента (pm install), когда агент
+    подключится; в отчёте — итог установки.
+
 .PARAMETER KeepInstance
     Этап 3 без сброса инстанса: повторный запуск Android с сохранёнными данными и кэшами
     шейдеров (проверка статтеров при повторном запуске). По умолчанию инстанс сбрасывается.
@@ -78,6 +82,7 @@ param(
     [switch]$NoUpload,
     [switch]$NoNet,
     [switch]$Agent,
+    [string]$Apk = '',
     [string]$Append = '',
     [ValidateSet('auto', 'gfxstream', 'gfxstream-gl', 'software')]
     [string]$Gpu = 'auto',
@@ -681,6 +686,7 @@ if ($Stages -contains 3 -and $images -and (Test-Path $Exe)) {
     }
     if (-not $NoNet) { $stage3Args += @('--net', 'user') }
     if ($script:AgentPath) { $stage3Args += @('--agent', $script:AgentPath) }
+    if ($script:AgentPath -and $Apk) { $stage3Args += @('--install', (Resolve-Path $Apk).Path) }
     if ($KeepInstance) { "stage3 instance: kept" | Add-Content -Path (Join-Path $Out 'system.txt') -Encoding UTF8 }
     # Профиль гостя: после загрузки shell на консоли раз в 10 с печатает top (строки с «TOP »).
     $guestTop = 'while [ "$(getprop sys.boot_completed)" != 1 ]; do sleep 5; done; sleep 15; ' +
@@ -755,6 +761,12 @@ if ($Stages -contains 3 -and $images -and (Test-Path $Exe)) {
         $fg = Select-String -Path $logs -Pattern 'активное приложение гостя' -SimpleMatch -Encoding UTF8 -ErrorAction SilentlyContinue
         if ($fg) { Ok "stage3: агент сообщает активное приложение ($(@($fg).Count) раз)" }
         else { Warn 'stage3: агент не сообщил активное приложение' }
+        if ($Apk) {
+            $inst = Select-String -Path $logs -Pattern 'APK установлен', 'APK не установлен' -SimpleMatch -Encoding UTF8 -ErrorAction SilentlyContinue | Select-Object -First 1
+            if ($inst -and $inst.Line -match 'APK установлен') { Ok 'stage3: APK установлен через агента' }
+            elseif ($inst) { Warn "stage3: APK не установлен: $($inst.Line -replace '\x1b\[[0-9;]*m', '')" }
+            else { Warn 'stage3: нет итога установки APK' }
+        }
     }
     # Профиль: загрузка CPU по потокам и время команд virtio-gpu (раз в 10 с).
     $perf = Select-String -Path (Join-Path $Out 'stage3-stderr.log'), (Join-Path $Out 'stage3-stdout.log') `
