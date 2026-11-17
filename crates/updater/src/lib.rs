@@ -59,7 +59,10 @@ impl SignedSource {
             if attempt > 0 {
                 std::thread::sleep(std::time::Duration::from_secs(attempt));
             }
-            match ureq::get(&url).call().and_then(|mut r| r.body_mut().read_to_vec()) {
+            match ureq::get(&url)
+                .call()
+                .and_then(|mut r| r.body_mut().read_to_vec())
+            {
                 Ok(body) => return Ok(body),
                 Err(e) => last = Some(e),
             }
