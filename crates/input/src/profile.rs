@@ -328,6 +328,8 @@ mod tests {
             Err(ProfileError::TooNew(2))
         ));
         assert!(Profile::from_json("{").is_err());
-        assert!(Profile::from_json("\u{feff}{\"version\":1,\"name\":\"x\",\"controls\":[]}").is_ok());
+        assert!(
+            Profile::from_json("\u{feff}{\"version\":1,\"name\":\"x\",\"controls\":[]}").is_ok()
+        );
     }
 }
