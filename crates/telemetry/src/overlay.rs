@@ -186,6 +186,42 @@ const GLYPHS: &[(char, [&str; 7])] = &[
         ],
     ),
     (
+        'D',
+        [
+            "####.", "#...#", "#...#", "#...#", "#...#", "#...#", "####.",
+        ],
+    ),
+    (
+        'J',
+        [
+            "..###", "...#.", "...#.", "...#.", "...#.", "#..#.", ".##..",
+        ],
+    ),
+    (
+        'K',
+        [
+            "#...#", "#..#.", "#.#..", "##...", "#.#..", "#..#.", "#...#",
+        ],
+    ),
+    (
+        'Q',
+        [
+            ".###.", "#...#", "#...#", "#...#", "#.#.#", "#..#.", ".##.#",
+        ],
+    ),
+    (
+        'Y',
+        [
+            "#...#", "#...#", ".#.#.", "..#..", "..#..", "..#..", "..#..",
+        ],
+    ),
+    (
+        'Z',
+        [
+            "#####", "....#", "...#.", "..#..", ".#...", "#....", "#####",
+        ],
+    ),
+    (
         '.',
         [
             ".....", ".....", ".....", ".....", ".....", ".##..", ".##..",
@@ -301,7 +337,7 @@ pub fn text_width(s: &str, scale: usize) -> usize {
 /// Данные для оверлея.
 #[derive(Debug, Clone, Default)]
 pub struct OverlayData {
-    /// Строки текста (`A`–`X` без части букв, цифры, `.:%-/`; см. `GLYPHS`).
+    /// Строки текста (латиница без части букв, цифры, `.:%-/`; см. `GLYPHS`).
     pub lines: Vec<String>,
     /// Последние времена кадра, мс (для графика).
     pub frame_times_ms: Vec<f32>,
@@ -370,9 +406,99 @@ pub fn draw(canvas: &mut Canvas<'_>, data: &OverlayData, scale: usize) {
     }
 }
 
+/// Метка контрола редактора управления: кольцо с подписью клавиши.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Marker {
+    /// Центр X (доля ширины кадра).
+    pub x: f32,
+    /// Центр Y (доля высоты кадра).
+    pub y: f32,
+    /// Радиус (доля высоты кадра).
+    pub radius: f32,
+    /// Подпись.
+    pub label: String,
+    /// Выбрана (другой цвет).
+    pub selected: bool,
+}
+
+/// Рисует метки редактора поверх кадра. Только запись пикселей (без чтения) — можно рисовать
+/// прямо в буфер загрузки GPU.
+pub fn draw_markers(canvas: &mut Canvas<'_>, markers: &[Marker], scale: usize) {
+    let scale = scale.max(1);
+    #[allow(clippy::cast_precision_loss, reason = "пиксели кадра")]
+    let (w, h) = (canvas.width as f32, canvas.height as f32);
+    for m in markers {
+        let color = if m.selected { GREEN } else { WHITE };
+        let (cx, cy, r) = (m.x * w, m.y * h, (m.radius * h).max(4.0));
+        // Кольцо толщиной 2 × scale: точки по окружности с шагом ~1 пиксель.
+        let steps = (r * std::f32::consts::TAU).ceil().max(16.0);
+        #[allow(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            clippy::cast_precision_loss,
+            reason = "пиксели кадра"
+        )]
+        for k in 0..steps as usize {
+            let a = k as f32 / steps * std::f32::consts::TAU;
+            for t in 0..2 * scale {
+                let rr = r - t as f32;
+                let (x, y) = (cx + rr * a.cos(), cy + rr * a.sin());
+                if x >= 0.0 && y >= 0.0 {
+                    canvas.put(x as usize, y as usize, color);
+                }
+            }
+        }
+        let tw = text_width(&m.label, scale);
+        #[allow(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "пиксели кадра"
+        )]
+        let (tx, ty) = (
+            (cx as usize).saturating_sub(tw / 2),
+            (cy as usize).saturating_sub(GLYPH_H * scale / 2),
+        );
+        canvas.text(tx, ty, scale, &m.label, color);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn markers_draw_ring_and_label_in_bounds() {
+        let (w, h) = (200, 100);
+        let mut buf = vec![0_u8; w * h * 4];
+        let mut c = Canvas {
+            data: &mut buf,
+            width: w,
+            height: h,
+            stride: w * 4,
+        };
+        let m = Marker {
+            x: 0.5,
+            y: 0.5,
+            radius: 0.3,
+            label: "WASD".into(),
+            selected: true,
+        };
+        // Метка у самого края не выходит за буфер.
+        let edge = Marker {
+            x: 1.0,
+            y: 0.0,
+            radius: 0.2,
+            label: "Q".into(),
+            selected: false,
+        };
+        draw_markers(&mut c, &[m, edge], 1);
+        // Кольцо: точка на окружности (центр 100,50, радиус 30) — зелёная.
+        let ring = (50 * w + 130) * 4;
+        assert_eq!(&buf[ring..ring + 3], &[0x40, 0xE0, 0x40]);
+        // Центр кольца за пределами подписи не закрашен.
+        let inside = (40 * w + 100) * 4;
+        assert_eq!(buf[inside + 3], 0);
+    }
 
     #[test]
     fn all_glyphs_are_5x7() {

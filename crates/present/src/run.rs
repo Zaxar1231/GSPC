@@ -1,11 +1,12 @@
 //! Поток композитора: кадр гостя → D3D12, метрики для оверлея и логов.
 
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
 use rustdroid_gpu::Mailbox;
 use rustdroid_telemetry::FrameStats;
+pub use rustdroid_telemetry::overlay::Marker;
 use rustdroid_telemetry::overlay::OverlayData;
 
 use crate::d3d12::{PresentMode, Presenter};
@@ -31,15 +32,43 @@ pub struct PresentConfig {
     pub refresh_hz: u32,
 }
 
+/// Метки редактора управления поверх кадра: ставит UI-поток, рисует композитор.
+#[derive(Debug, Default)]
+pub struct Markers {
+    list: Mutex<Vec<Marker>>,
+    version: AtomicU64,
+}
+
+impl Markers {
+    /// Новые метки (пусто — не рисовать); композитор перерисует кадр.
+    pub fn set(&self, markers: Vec<Marker>) {
+        *self.list.lock().unwrap_or_else(PoisonError::into_inner) = markers;
+        self.version.fetch_add(1, Ordering::Release);
+    }
+
+    fn version(&self) -> u64 {
+        self.version.load(Ordering::Acquire)
+    }
+
+    fn snapshot(&self) -> Vec<Marker> {
+        self.list
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
+}
+
 /// Запускает композитор в текущем потоке до `stop`.
 ///
-/// `guest` — счётчик времени работы vCPU для строки `VCPU` оверлея.
+/// `guest` — счётчик времени работы vCPU для строки `VCPU` оверлея; `markers` — метки
+/// редактора управления.
 pub fn run(
     window: WindowHandle,
     mailbox: &Arc<Mailbox>,
     stop: &AtomicBool,
     cfg: PresentConfig,
     guest: Option<GuestRuntime>,
+    markers: &Markers,
 ) {
     let _mmcss = MmcssGames::enter();
     let Some(first) = wait_first(mailbox, stop) else {
@@ -76,6 +105,7 @@ pub fn run(
     // Последний выведенный кадр (для перевывода с оверлеем, пока гость не шлёт новые).
     let mut last: Option<Arc<rustdroid_gpu::Frame>> = None;
     let mut last_overlay = Instant::now();
+    let (mut marks, mut marks_seen) = (Vec::new(), 0_u64);
     let mut overlay = OverlayData {
         lines: Vec::with_capacity(6),
         frame_times_ms: Vec::with_capacity(256),
@@ -101,15 +131,22 @@ pub fn run(
             idle_gaps = 0;
             frames = 0;
         }
-        let Some(frame) = mailbox.wait_after(seen, Duration::from_millis(100)) else {
+        let marks_changed = markers.version() != marks_seen;
+        if marks_changed {
+            marks_seen = markers.version();
+            marks = markers.snapshot();
+        }
+        let wait = if marks.is_empty() { 100 } else { 16 };
+        let Some(frame) = mailbox.wait_after(seen, Duration::from_millis(wait)) else {
             // Экран гостя не меняется (Android не шлёт кадры): раз в секунду перевыводим
-            // последний кадр со свежим оверлеем, иначе цифры застывают и окно выглядит зависшим.
-            if cfg.overlay
-                && last_overlay.elapsed() >= IDLE_GAP
+            // последний кадр со свежим оверлеем, иначе цифры застывают и окно выглядит зависшим;
+            // метки редактора перерисовываются сразу.
+            if (marks_changed || (cfg.overlay && last_overlay.elapsed() >= IDLE_GAP))
                 && let Some(prev) = &last
             {
                 fill_overlay(&mut overlay, &mut stats, &mut latency, &usage, &times, true);
-                if let Err(e) = presenter.present(prev, Some(&overlay), cfg.mode) {
+                let ov = cfg.overlay.then_some(&overlay);
+                if let Err(e) = presenter.present(prev, ov, &marks, cfg.mode) {
                     tracing::error!(error = %e, "ошибка вывода кадра");
                     break;
                 }
@@ -155,7 +192,7 @@ pub fn run(
         } else {
             None
         };
-        if let Err(e) = presenter.present(&frame, overlay_ref, cfg.mode) {
+        if let Err(e) = presenter.present(&frame, overlay_ref, &marks, cfg.mode) {
             tracing::error!(error = %e, "ошибка вывода кадра");
             break;
         }

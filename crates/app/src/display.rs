@@ -16,6 +16,7 @@ use rustdroid_devices::{InputKind, TouchState};
 use rustdroid_gfxstream::{Config as GfxConfig, ffi::flags as gfx_flags};
 use rustdroid_gpu::gfxstream::GfxstreamBackend;
 use rustdroid_gpu::{DisplayMode, FenceSink, Mailbox};
+use rustdroid_input::editor::EditEvent;
 use rustdroid_input::keymap::HostEvent;
 use rustdroid_input::keys::{KEY_BACK, key_name, linux_keycode, nav_shortcut};
 use rustdroid_present::d3d12::PresentMode;
@@ -256,97 +257,140 @@ pub(crate) fn run(
             .map(|_| tx)
     });
     // Профили управления: события окна сначала идут в профиль, занятые — гостю не передаются.
+    let markers = Arc::new(rustdroid_present::run::Markers::default());
     let controls = crate::controls::Controls::new(
         crate::controls::load(vm)?,
         (w, h),
         touch.clone(),
         Arc::clone(&touch_state),
+        Arc::clone(&markers),
     );
     let ui_controls = controls.clone();
     // Левая кнопка: состояние и то, что её нажатие забрал профиль (до отпускания).
     let (mut lbutton, mut lbutton_used) = (false, false);
     let close_stopper = stopper.clone();
-    let handler = move |e: WindowEvent| match e {
-        WindowEvent::Pointer { x, y, down } => {
-            if down != lbutton {
-                lbutton = down;
-                let used = ui_controls.handle(HostEvent::Key {
-                    name: "LButton",
-                    pressed: down,
-                });
-                if down {
-                    lbutton_used = used;
-                } else if lbutton_used {
+    let handler = move |e: WindowEvent| {
+        // F12 — редактор управления; пока он открыт, мышь и клавиши идут в него, а не в игру.
+        if let WindowEvent::Key {
+            scancode: 0x58,
+            extended: false,
+            pressed,
+        } = e
+        {
+            if pressed {
+                ui_controls.toggle_editor();
+            }
+            return;
+        }
+        if ui_controls.editing() {
+            match e {
+                WindowEvent::Pointer { x, y, down } => {
+                    let ev = match (down, lbutton) {
+                        (true, false) => EditEvent::Press { x, y },
+                        (true, true) => EditEvent::Drag { x, y },
+                        (false, _) => EditEvent::Release,
+                    };
+                    lbutton = down;
                     lbutton_used = false;
+                    ui_controls.edit(ev);
+                }
+                WindowEvent::Key {
+                    scancode,
+                    extended,
+                    pressed: true,
+                } => {
+                    if let Some(name) = key_name(scancode, extended) {
+                        ui_controls.edit(EditEvent::Key(name));
+                    }
+                }
+                WindowEvent::Wheel { notches, .. } => ui_controls.edit(EditEvent::Wheel(notches)),
+                WindowEvent::Close => close_stopper.stop(),
+                _ => {}
+            }
+            return;
+        }
+        match e {
+            WindowEvent::Pointer { x, y, down } => {
+                if down != lbutton {
+                    lbutton = down;
+                    let used = ui_controls.handle(HostEvent::Key {
+                        name: "LButton",
+                        pressed: down,
+                    });
+                    if down {
+                        lbutton_used = used;
+                    } else if lbutton_used {
+                        lbutton_used = false;
+                        return;
+                    }
+                }
+                if lbutton_used {
                     return;
                 }
-            }
-            if lbutton_used {
-                return;
-            }
-            if let Some(t) = &touch {
-                let mut st = touch_state.lock().unwrap_or_else(PoisonError::into_inner);
-                let events = if down {
-                    st.touch(MOUSE_SLOT, to_panel(x, w), to_panel(y, h))
-                } else {
-                    st.release(MOUSE_SLOT)
-                };
-                drop(st);
-                if !events.is_empty() {
-                    t.push(&events);
+                if let Some(t) = &touch {
+                    let mut st = touch_state.lock().unwrap_or_else(PoisonError::into_inner);
+                    let events = if down {
+                        st.touch(MOUSE_SLOT, to_panel(x, w), to_panel(y, h))
+                    } else {
+                        st.release(MOUSE_SLOT)
+                    };
+                    drop(st);
+                    if !events.is_empty() {
+                        t.push(&events);
+                    }
                 }
             }
-        }
-        WindowEvent::Wheel { x, y, notches } => {
-            if ui_controls.handle(HostEvent::Wheel { notches }) {
-                return;
+            WindowEvent::Wheel { x, y, notches } => {
+                if ui_controls.handle(HostEvent::Wheel { notches }) {
+                    return;
+                }
+                if let Some(tx) = &wheel {
+                    let _ = tx.send((x, y, notches));
+                }
             }
-            if let Some(tx) = &wheel {
-                let _ = tx.send((x, y, notches));
+            WindowEvent::Key {
+                scancode,
+                extended,
+                pressed,
+            } => {
+                if let Some(name) = key_name(scancode, extended)
+                    && ui_controls.handle(HostEvent::Key { name, pressed })
+                {
+                    return;
+                }
+                // Esc/F2/F3 — «Назад»/«Домой»/«Недавние»: у образа нет кнопок навигации на экране.
+                let code =
+                    nav_shortcut(scancode, extended).or_else(|| linux_keycode(scancode, extended));
+                if let (Some(k), Some(code)) = (&keyboard, code) {
+                    k.push(&key_events(code, pressed));
+                }
             }
-        }
-        WindowEvent::Key {
-            scancode,
-            extended,
-            pressed,
-        } => {
-            if let Some(name) = key_name(scancode, extended)
-                && ui_controls.handle(HostEvent::Key { name, pressed })
-            {
-                return;
+            WindowEvent::Secondary { down } => {
+                if ui_controls.handle(HostEvent::Key {
+                    name: "RButton",
+                    pressed: down,
+                }) {
+                    return;
+                }
+                if let Some(k) = &keyboard {
+                    k.push(&key_events(KEY_BACK, down));
+                }
             }
-            // Esc/F2/F3 — «Назад»/«Домой»/«Недавние»: у образа нет кнопок навигации на экране.
-            let code =
-                nav_shortcut(scancode, extended).or_else(|| linux_keycode(scancode, extended));
-            if let (Some(k), Some(code)) = (&keyboard, code) {
-                k.push(&key_events(code, pressed));
+            WindowEvent::Middle { down } => {
+                ui_controls.handle(HostEvent::Key {
+                    name: "MButton",
+                    pressed: down,
+                });
             }
-        }
-        WindowEvent::Secondary { down } => {
-            if ui_controls.handle(HostEvent::Key {
-                name: "RButton",
-                pressed: down,
-            }) {
-                return;
+            WindowEvent::Cursor { x, y } => {
+                ui_controls.handle(HostEvent::Cursor { x, y });
             }
-            if let Some(k) = &keyboard {
-                k.push(&key_events(KEY_BACK, down));
+            WindowEvent::MouseDelta { dx, dy } => {
+                ui_controls.handle(HostEvent::MouseMove { dx, dy });
             }
+            WindowEvent::FocusLost => ui_controls.release_all(),
+            WindowEvent::Close => close_stopper.stop(),
         }
-        WindowEvent::Middle { down } => {
-            ui_controls.handle(HostEvent::Key {
-                name: "MButton",
-                pressed: down,
-            });
-        }
-        WindowEvent::Cursor { x, y } => {
-            ui_controls.handle(HostEvent::Cursor { x, y });
-        }
-        WindowEvent::MouseDelta { dx, dy } => {
-            ui_controls.handle(HostEvent::MouseMove { dx, dy });
-        }
-        WindowEvent::FocusLost => ui_controls.release_all(),
-        WindowEvent::Close => close_stopper.stop(),
     };
     let title = format!("RustDroid — {w}x{h} @ {} Гц", screen.spec.refresh_hz);
     let win = window::create(&title, w, h, handler).context("не удалось создать окно")?;
@@ -371,9 +415,12 @@ pub(crate) fn run(
         (Box::new(move || load.total_runtime_100ns()), vcpus);
     let present = {
         let (mailbox, stop) = (Arc::clone(&screen.mailbox), Arc::clone(&stop));
+        let markers = Arc::clone(&markers);
         std::thread::Builder::new()
             .name("present".into())
-            .spawn(move || rustdroid_present::run::run(win, &mailbox, &stop, cfg, Some(guest)))
+            .spawn(move || {
+                rustdroid_present::run::run(win, &mailbox, &stop, cfg, Some(guest), &markers);
+            })
             .context("не удалось запустить поток композитора")?
     };
     let vm_thread = std::thread::Builder::new()

@@ -16,7 +16,7 @@ use std::mem::ManuallyDrop;
 use rustdroid_gpu::{Frame, PixelFormat};
 
 use crate::blit::{Blit, Pass, TARGET_FORMAT};
-use rustdroid_telemetry::overlay::{self, Canvas, OverlayData};
+use rustdroid_telemetry::overlay::{self, Canvas, Marker, OverlayData};
 use windows::Win32::Foundation::{CloseHandle, HANDLE, HWND, WAIT_OBJECT_0};
 use windows::Win32::Graphics::Direct3D::D3D_FEATURE_LEVEL_11_0;
 use windows::Win32::Graphics::Direct3D12::{
@@ -457,6 +457,7 @@ impl Presenter {
         &mut self,
         frame: &Frame,
         overlay_data: Option<&OverlayData>,
+        markers: &[Marker],
         mode: PresentMode,
     ) -> Result<()> {
         let (w, h) = (frame.width, frame.height);
@@ -509,6 +510,18 @@ impl Presenter {
         }
         if let Some(data) = overlay_data {
             self.draw_overlay(frame, data, ptr, row_pitch);
+        }
+        if !markers.is_empty() {
+            // SAFETY: upload-буфер размером row_pitch * h байт, его строки заполнены выше;
+            // draw_markers только пишет пиксели (write-combined память не читается).
+            let data = unsafe { std::slice::from_raw_parts_mut(ptr, row_pitch * h as usize) };
+            let mut canvas = Canvas {
+                data,
+                width: w as usize,
+                height: h as usize,
+                stride: row_pitch,
+            };
+            overlay::draw_markers(&mut canvas, markers, overlay_scale(h));
         }
 
         // SAFETY: back buffer с этим индексом существует.
@@ -610,13 +623,7 @@ impl Presenter {
 
     /// Оверлей: копия угла кадра в CPU-буфер, отрисовка, запись в upload-буфер.
     fn draw_overlay(&mut self, frame: &Frame, data: &OverlayData, ptr: *mut u8, row_pitch: usize) {
-        let scale = if frame.height >= 1440 {
-            3
-        } else if frame.height >= 900 {
-            2
-        } else {
-            1
-        };
+        let scale = overlay_scale(frame.height);
         let rw = (300 * scale).min(frame.width as usize);
         let rh = ((data.lines.len() * 10 + 48) * scale).min(frame.height as usize);
         let stride = frame.stride as usize;
@@ -657,5 +664,16 @@ impl Drop for Presenter {
         let _ = unsafe { CloseHandle(self.fence_event) };
         // SAFETY: waitable object swapchain закрывает владелец (документация DXGI).
         let _ = unsafe { CloseHandle(self.waitable) };
+    }
+}
+
+/// Масштаб шрифта оверлея по высоте кадра.
+fn overlay_scale(height: u32) -> usize {
+    if height >= 1440 {
+        3
+    } else if height >= 900 {
+        2
+    } else {
+        1
     }
 }
