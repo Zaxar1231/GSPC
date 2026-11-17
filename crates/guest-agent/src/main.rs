@@ -4,28 +4,26 @@
 //! (CID 2, порт [`rustdroid_agent::PORT`]): шлёт `Hello`, сообщает активное приложение и
 //! устанавливает APK, присланные хостом. Протокол — `rustdroid_agent::proto`.
 //!
-//! На хосте, кроме Linux, бинарник собирается, но не работает: vsock есть только в Linux.
+//! На хосте, кроме Linux и Android, бинарник собирается, но не работает: vsock есть только там.
+//! Важно: у цели Android `target_os = "android"`, не `"linux"`.
 
 use std::process::ExitCode;
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "android"))]
 mod linux;
 
 fn main() -> ExitCode {
-    #[cfg(target_os = "linux")]
-    {
-        match linux::run() {
-            Ok(()) => ExitCode::SUCCESS,
-            Err(e) => {
-                #[allow(clippy::print_stderr, reason = "агент — демон, журнал — stderr")]
-                {
-                    eprintln!("rustdroid-agent: {e}");
-                }
-                ExitCode::FAILURE
-            }
+    // Демон: связь с хостом оборвалась или не установилась — пробуем снова.
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    loop {
+        let e = linux::run().err().unwrap_or_else(|| "хост закрыл соединение".to_owned());
+        #[allow(clippy::print_stderr, reason = "агент — демон, журнал — stderr")]
+        {
+            eprintln!("rustdroid-agent: {e}; повтор через 2 с");
         }
+        std::thread::sleep(std::time::Duration::from_secs(2));
     }
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(not(any(target_os = "linux", target_os = "android")))]
     {
         #[allow(clippy::print_stderr, reason = "агент — демон, журнал — stderr")]
         {

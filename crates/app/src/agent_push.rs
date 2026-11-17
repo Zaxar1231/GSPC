@@ -25,7 +25,8 @@ pub(crate) fn push_script(size: usize) -> String {
          [ $(stat -c %s {GUEST_PATH}) = {size} ]' </dev/null >/dev/null 2>&1 \
          && echo 'rustdroid: agent written' || echo 'rustdroid: agent write failed'; \
          su 0 sh -c 'nohup {GUEST_PATH} > {GUEST_PATH}.log 2>&1 &' </dev/null; \
-         echo 'rustdroid: agent started') &\n"
+         echo 'rustdroid: agent started'; sleep 10; \
+         su 0 head -5 {GUEST_PATH}.log | sed 's/^/AGENTLOG /') &\n"
     )
 }
 
