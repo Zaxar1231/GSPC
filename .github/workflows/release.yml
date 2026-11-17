@@ -76,14 +76,58 @@ jobs:
             "$((Get-FileHash $_ -Algorithm SHA256).Hash.ToLower())  $($_.Name)"
           } | Set-Content -Encoding ascii SHA256SUMS.txt
 
-      # Этап 7: Velopack (vpk pack) — установщик Setup.exe, полные и дельта-пакеты, releases.*.json,
-      # ed25519-подпись манифеста обновлений (секрет UPDATE_SIGNING_KEY).
+      # Velopack: установщик Setup.exe, полный и дельта-пакет, фид releases.<канал>.json.
+      # Фид и пакеты живут в pre-release `updates` (оттуда их берёт rustdroid-updater),
+      # Setup.exe — ещё и в релизе версии. Канал: тег с дефисом — beta, иначе stable.
+      - name: Velopack — установщик и пакеты обновлений
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SIGNING_KEY: ${{ secrets.UPDATE_SIGNING_KEY }}
+        run: |
+          if (-not $env:SIGNING_KEY) {
+            Write-Error 'Нет секрета UPDATE_SIGNING_KEY: без подписи фида обновления не примутся'
+            exit 1
+          }
+          $v = "${{ steps.meta.outputs.version }}"
+          $channel = if ('${{ steps.meta.outputs.prerelease }}' -eq 'true') { 'beta' } else { 'stable' }
+          $feed = 'https://github.com/${{ github.repository }}/releases/download/updates'
+          dotnet tool install -g vpk
+          New-Item -ItemType Directory -Force releases | Out-Null
+          # Прошлый полный пакет канала — для дельты (в первый раз его нет).
+          vpk download http --url $feed --channel $channel -o releases
+          if ($LASTEXITCODE -ne 0) { Write-Host 'прошлых пакетов нет — только полный пакет' }
+          vpk pack --packId RustDroid --packVersion $v --packDir dist --mainExe rustdroid.exe `
+            --packTitle RustDroid --channel $channel -o releases
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          # Подпись фида ed25519 (ключ PEM из секрета).
+          $key = Join-Path $env:RUNNER_TEMP 'update-key.pem'
+          [IO.File]::WriteAllText($key, $env:SIGNING_KEY)
+          $json = "releases/releases.$channel.json"
+          openssl pkeyutl -sign -inkey $key -rawin -in $json -out "$json.sig"
+          $signed = $LASTEXITCODE
+          Remove-Item $key
+          if ($signed -ne 0) { exit 1 }
+          # Публикация фида и пакетов.
+          gh release view updates *> $null
+          if ($LASTEXITCODE -ne 0) {
+            gh release create updates --prerelease --title 'Обновления (Velopack)' `
+              --notes 'Фиды и пакеты автообновления RustDroid. Устанавливать — Setup.exe из релиза версии.'
+          }
+          $files = Get-ChildItem releases -File | Where-Object { $_.Name -like "RustDroid-$v-*" -or $_.Name -like "releases.$channel.json*" -or $_.Name -like 'assets.*.json' }
+          gh release upload updates @($files.FullName) --clobber
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          # Имя установщика у vpk зависит от канала (…-Setup.exe / …-beta-Setup.exe).
+          $setup = "RustDroid-$v-win-x64-Setup.exe"
+          Copy-Item (Get-ChildItem releases -Filter '*Setup.exe' | Select-Object -First 1).FullName $setup
+          "$((Get-FileHash $setup -Algorithm SHA256).Hash.ToLower())  $setup" | Add-Content -Encoding ascii SHA256SUMS.txt
 
       - uses: actions/upload-artifact@v7
         with:
           name: release-files
           path: |
             RustDroid-*.zip
+            RustDroid-*-Setup.exe
             SHA256SUMS.txt
 
   publish:
@@ -116,4 +160,5 @@ jobs:
           prerelease: ${{ needs.build.outputs.prerelease == 'true' }}
           files: |
             RustDroid-*.zip
+            RustDroid-*-Setup.exe
             SHA256SUMS.txt

@@ -21,3 +21,13 @@ Windows Hypervisor Platform. Сверху: ed25519-подпись манифес
 
 - UAC появляется только на шаге включения WHPX.
 - Ассоциации и ярлыки — в HKCU через хуки установки.
+
+## Реализация (этап 7)
+
+- Отдельного `rustdroid-elevate.exe` нет: `rustdroid enable-whpx` запускает `dism` через
+  `ShellExecuteExW` с глаголом `runas` — UAC так же появляется только на этом шаге, а лишнего
+  бинарника и манифеста нет.
+- Фиды и пакеты лежат в постоянном pre-release `updates` (каналы `stable` и `beta` —
+  `releases.<канал>.json`); собственный источник `rustdroid_updater::SignedSource` проверяет
+  ed25519-подпись фида (`.sig`, `ring` — уже приходит с rustls) до того, как Velopack ему поверит.
+- Откат: фид без «плохой» версии + `AllowVersionDowngrade` (Velopack сам не откатывает).
