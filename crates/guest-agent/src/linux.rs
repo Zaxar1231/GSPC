@@ -130,13 +130,23 @@ pub(crate) fn run() -> Result<(), String> {
     let mut last_fg = String::new();
     let mut next_fg = Instant::now();
     let mut buf = [0u8; 16 * 1024];
+    let mut total = 0_usize;
     loop {
         match sock.read(&mut buf) {
             Ok(0) => return Ok(()),
             Ok(n) => {
-                let msgs = decoder
-                    .feed(buf.get(..n).unwrap_or(&[]))
-                    .map_err(|e| e.to_string())?;
+                total += n;
+                let msgs = decoder.feed(buf.get(..n).unwrap_or(&[])).map_err(|e| {
+                    // Что именно пришло: без этого порчу потока не найти.
+                    let head = decoder.buffered();
+                    let hex: Vec<String> =
+                        head.iter().take(24).map(|b| format!("{b:02x}")).collect();
+                    format!(
+                        "{e} (всего {total} Б, чтение {n} Б, в буфере {} Б: {})",
+                        head.len(),
+                        hex.join(" ")
+                    )
+                })?;
                 for m in msgs {
                     handle_host(m, &mut sock, &mut install)?;
                 }

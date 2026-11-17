@@ -833,6 +833,47 @@ mod tests {
     }
 
     #[test]
+    fn agent_install_frames_arrive_intact() {
+        use rustdroid_agent::proto::{Decoder, Message, PORT, VERSION, encode};
+        let outbox = VsockOutbox::new();
+        let (svc, host) = crate::agent::new(std::sync::Arc::clone(&outbox));
+        let mut dev = VirtioVsock::new(3).with_services(
+            vec![(PORT, Box::new(svc) as Box<dyn VsockService>)],
+            std::sync::Arc::clone(&outbox),
+        );
+        let mut req = guest_packet(OP_REQUEST, 0);
+        req.dst_port = PORT;
+        req.buf_alloc = 256 * 1024;
+        dev.handle(&req, &[]);
+        let hello = encode(&Message::Hello { version: VERSION });
+        let mut rw = guest_packet(OP_RW, u32::try_from(hello.len()).unwrap());
+        rw.dst_port = PORT;
+        rw.buf_alloc = 256 * 1024;
+        dev.handle(&rw, &hello);
+        let apk: Vec<u8> = (0..33_000_u32).map(|i| (i % 251) as u8).collect();
+        let _rx = host.install("a.apk", &apk).unwrap();
+        dev.drain_outbox();
+
+        let mut dec = Decoder::default();
+        let mut got = Vec::new();
+        for p in dev.pending.drain(..).filter(|p| p.hdr.op == OP_RW) {
+            assert_eq!(p.data.len(), p.hdr.len as usize);
+            assert!(p.data.len() <= MAX_PAYLOAD);
+            got.extend(dec.feed(&p.data).unwrap());
+        }
+        let data: Vec<u8> = got
+            .iter()
+            .filter_map(|m| match m {
+                Message::InstallChunk { data, .. } => Some(data.clone()),
+                _ => None,
+            })
+            .flatten()
+            .collect();
+        assert_eq!(data, apk);
+        assert!(matches!(got.last(), Some(Message::InstallEnd { .. })));
+    }
+
+    #[test]
     fn closing_notifies_service() {
         let (mut dev, _) = with_service(Echo::default());
         dev.handle(&guest_packet(OP_REQUEST, 0), &[]);

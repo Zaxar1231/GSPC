@@ -223,6 +223,12 @@ pub struct Decoder {
 }
 
 impl Decoder {
+    /// Непрочитанные байты (для диагностики после [`StreamError`]).
+    #[must_use]
+    pub fn buffered(&self) -> &[u8] {
+        &self.buf
+    }
+
     /// Добавляет данные; возвращает все полностью пришедшие сообщения. Неизвестный тип
     /// пропускается (протокол расширяемый), но неверная длина — [`StreamError`].
     ///
@@ -232,22 +238,29 @@ impl Decoder {
         self.buf.extend_from_slice(data);
         let mut out = Vec::new();
         let mut at = 0usize;
+        let mut bad = false;
         while let Some(head) = self.buf.get(at..at + 4) {
-            let len = u32::from_le_bytes(head.try_into().map_err(|_| StreamError)?) as usize;
+            let len = u32::from_le_bytes([head[0], head[1], head[2], head[3]]) as usize;
             if len == 0 || len > MAX_MESSAGE {
-                return Err(StreamError);
+                bad = true;
+                break;
             }
             let Some(frame) = self.buf.get(at + 4..at + 4 + len) else {
                 break;
             };
             let (&ty, body) = frame.split_first().ok_or(StreamError)?;
             if (T_HELLO..=T_PONG).contains(&ty) {
-                out.push(decode(ty, body).ok_or(StreamError)?);
+                let Some(m) = decode(ty, body) else {
+                    bad = true;
+                    break;
+                };
+                out.push(m);
             }
             at += 4 + len;
         }
+        // Разобранное убираем и при ошибке: в буфере остаётся место поломки.
         self.buf.drain(..at);
-        Ok(out)
+        if bad { Err(StreamError) } else { Ok(out) }
     }
 }
 
