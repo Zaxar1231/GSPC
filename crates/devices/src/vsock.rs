@@ -864,7 +864,14 @@ mod tests {
         });
         // Буферы гостя по 100 байт: в каждый — заголовок и 56 байт данных.
         for slot in 0..4_u16 {
-            post(&mem, &rx, slot, 0x11000 + u64::from(slot) * 0x100, 100, VIRTQ_DESC_F_WRITE);
+            post(
+                &mem,
+                &rx,
+                slot,
+                0x11000 + u64::from(slot) * 0x100,
+                100,
+                VIRTQ_DESC_F_WRITE,
+            );
         }
         dev.process_queue(RX_QUEUE, &mut rx, &mem).unwrap();
         let mut got = Vec::new();
@@ -874,7 +881,8 @@ mod tests {
             let h = Header::parse(&b);
             assert!(HEADER_LEN + h.len as usize <= 100);
             let mut d = vec![0_u8; h.len as usize];
-            mem.read(0x11000 + slot * 0x100 + HEADER_LEN as u64, &mut d).unwrap();
+            mem.read(0x11000 + slot * 0x100 + HEADER_LEN as u64, &mut d)
+                .unwrap();
             got.extend(d);
         }
         assert_eq!(got, data);
