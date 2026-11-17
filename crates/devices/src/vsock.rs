@@ -521,9 +521,29 @@ impl VirtioVsock {
         }
         let mut any = false;
         while !self.pending.is_empty() && queue.pop(mem, &mut self.chain)? {
-            let Some(p) = self.pending.pop_front() else {
+            let Some(mut p) = self.pending.pop_front() else {
                 break;
             };
+            // Больше буфера гостя писать нельзя: новые ядра дают буферы меньше 4 КБ (заголовок
+            // + ~3,7 КБ), обрезанный пакет гость читает как нули. Остаток — следующим пакетом.
+            let cap: usize = self
+                .chain
+                .descriptors
+                .iter()
+                .filter(|d| d.is_write())
+                .map(|d| d.len as usize)
+                .sum();
+            let room = cap.saturating_sub(HEADER_LEN);
+            if p.data.len() > room && room > 0 {
+                let rest = p.data.split_off(room);
+                let mut hdr = p.hdr;
+                #[allow(clippy::cast_possible_truncation, reason = "остаток ≤ MAX_PAYLOAD")]
+                {
+                    hdr.len = rest.len() as u32;
+                    p.hdr.len = room as u32;
+                }
+                self.pending.push_front(Packet { hdr, data: rest });
+            }
             let mut bytes = p.hdr.to_bytes().to_vec();
             bytes.extend_from_slice(&p.data);
             let mut written = 0_usize;
@@ -830,6 +850,35 @@ mod tests {
         outbox.send(7, b"nobody".to_vec());
         dev.drain_outbox();
         assert_eq!(drain(&mut dev), vec![(OP_RW, b"push".to_vec())]);
+    }
+
+    #[test]
+    fn packet_larger_than_guest_buffer_is_split() {
+        let mem = VecMemory::new(0x20000);
+        let mut dev = VirtioVsock::new(3);
+        let mut rx = queue(0x8000);
+        let data: Vec<u8> = (0..200_u8).collect();
+        dev.pending.push_back(Packet {
+            hdr: guest_packet(OP_RW, 200),
+            data: data.clone(),
+        });
+        // Буферы гостя по 100 байт: в каждый — заголовок и 56 байт данных.
+        for slot in 0..4_u16 {
+            post(&mem, &rx, slot, 0x11000 + u64::from(slot) * 0x100, 100, VIRTQ_DESC_F_WRITE);
+        }
+        dev.process_queue(RX_QUEUE, &mut rx, &mem).unwrap();
+        let mut got = Vec::new();
+        for slot in 0..4_u64 {
+            let mut b = [0_u8; HEADER_LEN];
+            mem.read(0x11000 + slot * 0x100, &mut b).unwrap();
+            let h = Header::parse(&b);
+            assert!(HEADER_LEN + h.len as usize <= 100);
+            let mut d = vec![0_u8; h.len as usize];
+            mem.read(0x11000 + slot * 0x100 + HEADER_LEN as u64, &mut d).unwrap();
+            got.extend(d);
+        }
+        assert_eq!(got, data);
+        assert!(dev.pending.is_empty());
     }
 
     #[test]
