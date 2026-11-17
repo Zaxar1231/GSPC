@@ -531,6 +531,8 @@ name = "rustdroid-input"
 version = "0.0.1"
 dependencies = [
  "criterion",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

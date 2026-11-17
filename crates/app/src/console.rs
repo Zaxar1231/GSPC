@@ -340,6 +340,7 @@ fn run_vm(
     vm: &VmArgs,
     console: ConsoleKind,
     guest_setup: Option<String>,
+    agent: Option<rustdroid_devices::agent::AgentHost>,
 ) -> Result<()> {
     let out = open_log(vm.serial_log.as_ref())?;
     if console == ConsoleKind::Hvc {
@@ -380,7 +381,7 @@ fn run_vm(
         spawn_timeout(vm.timeout, machine.stopper()).context("не удалось запустить таймер")?;
     }
     let result = match screen {
-        Some(screen) => display::run(machine, screen, vm),
+        Some(screen) => display::run(machine, screen, vm, agent),
         None => machine.run().map_err(anyhow::Error::from),
     };
     drop(raw);
@@ -427,7 +428,7 @@ pub(crate) fn boot(args: &BootArgs) -> Result<()> {
             open_disk(&spec)?,
         ));
     }
-    run_vm(&cfg, devices, &args.vm, args.vm.console, None)
+    run_vm(&cfg, devices, &args.vm, args.vm.console, None, None)
 }
 
 fn read(path: &Path) -> Result<Vec<u8>> {
@@ -592,9 +593,10 @@ pub(crate) fn boot_android(args: &AndroidArgs) -> Result<()> {
                 Ok((name, data))
             })
             .collect::<Result<Vec<_>>>()?;
+        let host = agent_host.clone();
         std::thread::Builder::new()
             .name("agent-install".into())
-            .spawn(move || install_apks(&agent_host, &apks))?;
+            .spawn(move || install_apks(&host, &apks))?;
     }
     // Агент: бинарник — через отдельную консоль hvc20 (см. agent_push), команды — через hvc0.
     let agent_script = match &args.vm.agent {
@@ -634,7 +636,7 @@ pub(crate) fn boot_android(args: &AndroidArgs) -> Result<()> {
         }
         script
     });
-    run_vm(&cfg, devices, &args.vm, ConsoleKind::Hvc, setup)
+    run_vm(&cfg, devices, &args.vm, ConsoleKind::Hvc, setup, Some(agent_host))
 }
 
 /// Ждёт подключения агента гостя и ставит APK по очереди; итог каждой установки — в лог.

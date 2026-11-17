@@ -130,6 +130,16 @@ pub(crate) struct VmArgs {
     #[arg(long)]
     pub install: Vec<std::path::PathBuf>,
 
+    /// Профиль управления (`.rdprofile`): клавиши и мышь → касания. Включён всегда, кроме игр,
+    /// у которых есть свой профиль в `--profiles`.
+    #[arg(long)]
+    pub profile: Option<std::path::PathBuf>,
+
+    /// Папка профилей управления (`*.rdprofile`): профиль включается сам, когда его игра
+    /// (`package`) на переднем плане (по данным гостевого агента).
+    #[arg(long)]
+    pub profiles: Option<std::path::PathBuf>,
+
     /// Сеть гостя: `user` — virtio-net с NAT в пользовательском режиме (интернет через сеть
     /// хоста без драйверов и прав администратора), `none` — без сети.
     #[arg(long, value_enum, default_value_t = NetMode::None)]

@@ -14,6 +14,8 @@ mod cli;
 #[cfg(windows)]
 mod console;
 #[cfg(windows)]
+mod controls;
+#[cfg(windows)]
 mod crash;
 #[cfg(windows)]
 mod display;

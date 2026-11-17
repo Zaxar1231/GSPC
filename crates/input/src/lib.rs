@@ -5,10 +5,12 @@
 //!
 //! Сейчас здесь перевод скан-кодов Windows в коды Linux ([`keys`]) и геометрия ([`geometry`]): координаты профиля хранятся в долях экрана
 //! (0–1) и переводятся в координаты сенсорной панели гостя с учётом ориентации.
-//! Контролы (Tap, D-pad, Aim, Swipe, Macro, MOBA-скилл и т. д.) появятся на этапе 6.
+//! [`profile`] — формат профиля управления, [`keymap`] — движок контролов (этап 6).
 
 pub mod geometry;
+pub mod keymap;
 pub mod keys;
+pub mod profile;
 pub mod wheel;
 
 pub use geometry::{NormPoint, PanelSize, Rotation, TouchPoint};

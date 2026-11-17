@@ -16,7 +16,8 @@ use rustdroid_devices::{InputKind, TouchState};
 use rustdroid_gfxstream::{Config as GfxConfig, ffi::flags as gfx_flags};
 use rustdroid_gpu::gfxstream::GfxstreamBackend;
 use rustdroid_gpu::{DisplayMode, FenceSink, Mailbox};
-use rustdroid_input::keys::{KEY_BACK, linux_keycode, nav_shortcut};
+use rustdroid_input::keymap::HostEvent;
+use rustdroid_input::keys::{KEY_BACK, key_name, linux_keycode, nav_shortcut};
 use rustdroid_present::d3d12::PresentMode;
 use rustdroid_present::run::PresentConfig;
 use rustdroid_present::window::{self, WindowEvent};
@@ -188,7 +189,7 @@ pub(crate) fn attach(devices: &mut VmDevices, spec: DisplaySpec, gpu: GpuMode) -
     clippy::cast_precision_loss,
     reason = "доли экрана → пиксели"
 )]
-fn to_panel(frac: f32, size: u32) -> u32 {
+pub(crate) fn to_panel(frac: f32, size: u32) -> u32 {
     (frac.clamp(0.0, 1.0) * size.saturating_sub(1) as f32).round() as u32
 }
 
@@ -230,7 +231,12 @@ fn wheel_loop(
 }
 
 /// Запускает ВМ с окном; возвращается, когда ВМ остановилась или окно закрыто.
-pub(crate) fn run(machine: Vm, screen: Screen, vm: &VmArgs) -> Result<(RunOutcome, ExitStats)> {
+pub(crate) fn run(
+    machine: Vm,
+    screen: Screen,
+    vm: &VmArgs,
+    agent: Option<rustdroid_devices::agent::AgentHost>,
+) -> Result<(RunOutcome, ExitStats)> {
     window::enable_dpi_awareness();
     let inputs = machine.inputs();
     let touch = inputs.first().cloned();
@@ -249,9 +255,35 @@ pub(crate) fn run(machine: Vm, screen: Screen, vm: &VmArgs) -> Result<(RunOutcom
             .ok()
             .map(|_| tx)
     });
+    // Профили управления: события окна сначала идут в профиль, занятые — гостю не передаются.
+    let controls = crate::controls::Controls::new(
+        crate::controls::load(vm)?,
+        (w, h),
+        touch.clone(),
+        Arc::clone(&touch_state),
+    );
+    let ui_controls = controls.clone();
+    // Левая кнопка: состояние и то, что её нажатие забрал профиль (до отпускания).
+    let (mut lbutton, mut lbutton_used) = (false, false);
     let close_stopper = stopper.clone();
     let handler = move |e: WindowEvent| match e {
         WindowEvent::Pointer { x, y, down } => {
+            if down != lbutton {
+                lbutton = down;
+                let used = ui_controls.handle(HostEvent::Key {
+                    name: "LButton",
+                    pressed: down,
+                });
+                if down {
+                    lbutton_used = used;
+                } else if lbutton_used {
+                    lbutton_used = false;
+                    return;
+                }
+            }
+            if lbutton_used {
+                return;
+            }
             if let Some(t) = &touch {
                 let mut st = touch_state.lock().unwrap_or_else(PoisonError::into_inner);
                 let events = if down {
@@ -266,6 +298,9 @@ pub(crate) fn run(machine: Vm, screen: Screen, vm: &VmArgs) -> Result<(RunOutcom
             }
         }
         WindowEvent::Wheel { x, y, notches } => {
+            if ui_controls.handle(HostEvent::Wheel { notches }) {
+                return;
+            }
             if let Some(tx) = &wheel {
                 let _ = tx.send((x, y, notches));
             }
@@ -275,6 +310,11 @@ pub(crate) fn run(machine: Vm, screen: Screen, vm: &VmArgs) -> Result<(RunOutcom
             extended,
             pressed,
         } => {
+            if let Some(name) = key_name(scancode, extended)
+                && ui_controls.handle(HostEvent::Key { name, pressed })
+            {
+                return;
+            }
             // Esc/F2/F3 — «Назад»/«Домой»/«Недавние»: у образа нет кнопок навигации на экране.
             let code =
                 nav_shortcut(scancode, extended).or_else(|| linux_keycode(scancode, extended));
@@ -283,14 +323,36 @@ pub(crate) fn run(machine: Vm, screen: Screen, vm: &VmArgs) -> Result<(RunOutcom
             }
         }
         WindowEvent::Secondary { down } => {
+            if ui_controls.handle(HostEvent::Key {
+                name: "RButton",
+                pressed: down,
+            }) {
+                return;
+            }
             if let Some(k) = &keyboard {
                 k.push(&key_events(KEY_BACK, down));
             }
         }
+        WindowEvent::Middle { down } => {
+            ui_controls.handle(HostEvent::Key {
+                name: "MButton",
+                pressed: down,
+            });
+        }
+        WindowEvent::Cursor { x, y } => {
+            ui_controls.handle(HostEvent::Cursor { x, y });
+        }
+        WindowEvent::MouseDelta { dx, dy } => {
+            ui_controls.handle(HostEvent::MouseMove { dx, dy });
+        }
+        WindowEvent::FocusLost => ui_controls.release_all(),
         WindowEvent::Close => close_stopper.stop(),
     };
     let title = format!("RustDroid — {w}x{h} @ {} Гц", screen.spec.refresh_hz);
     let win = window::create(&title, w, h, handler).context("не удалось создать окно")?;
+    controls
+        .spawn(win, agent)
+        .context("не удалось запустить поток профилей управления")?;
 
     let stop = Arc::new(AtomicBool::new(false));
     let cfg = PresentConfig {

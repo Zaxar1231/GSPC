@@ -8,20 +8,23 @@ use std::cell::{Cell, RefCell};
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
-use windows::Win32::Graphics::Gdi::{BLACK_BRUSH, GetStockObject, HBRUSH, ScreenToClient};
+use windows::Win32::Graphics::Gdi::{
+    BLACK_BRUSH, ClientToScreen, GetStockObject, HBRUSH, ScreenToClient,
+};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::HiDpi::{
     DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, SetProcessDpiAwarenessContext,
 };
 use windows::Win32::UI::Input::KeyboardAndMouse::{ReleaseCapture, SetCapture};
 use windows::Win32::UI::WindowsAndMessaging::{
-    AdjustWindowRectEx, CS_HREDRAW, CS_VREDRAW, CW_USEDEFAULT, CreateWindowExW, DefWindowProcW,
-    DestroyWindow, DispatchMessageW, GetClientRect, GetMessageW, IDC_ARROW, LoadCursorW, MSG,
-    PostMessageW, PostQuitMessage, RegisterClassExW, SPI_GETWORKAREA, SW_SHOW,
-    SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS, ShowWindow, SystemParametersInfoW, TranslateMessage,
-    WHEEL_DELTA, WM_CLOSE, WM_DESTROY, WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDOWN, WM_LBUTTONUP,
-    WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SYSKEYDOWN, WM_SYSKEYUP,
-    WNDCLASSEXW, WS_EX_APPWINDOW, WS_OVERLAPPEDWINDOW,
+    AdjustWindowRectEx, CS_HREDRAW, CS_VREDRAW, CW_USEDEFAULT, ClipCursor, CreateWindowExW,
+    DefWindowProcW, DestroyWindow, DispatchMessageW, GetClientRect, GetMessageW, GetWindowRect,
+    IDC_ARROW, LoadCursorW, MSG, PostMessageW, PostQuitMessage, RegisterClassExW,
+    SPI_GETWORKAREA, SW_SHOW, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS, SetCursorPos, ShowCursor,
+    ShowWindow, SystemParametersInfoW, TranslateMessage, WHEEL_DELTA, WM_APP, WM_CLOSE,
+    WM_DESTROY, WM_KEYDOWN, WM_KEYUP, WM_KILLFOCUS, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN,
+    WM_MBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SYSKEYDOWN,
+    WM_SYSKEYUP, WNDCLASSEXW, WS_EX_APPWINDOW, WS_OVERLAPPEDWINDOW,
 };
 use windows::core::{PCWSTR, w};
 
@@ -62,9 +65,34 @@ pub enum WindowEvent {
         /// Щелчки колеса (`WHEEL_DELTA` = 1), бывают дробными у точных колёс и тачпадов.
         notches: f32,
     },
+    /// Курсор над окном (без захвата): положение в долях экрана гостя.
+    Cursor {
+        /// X.
+        x: f32,
+        /// Y.
+        y: f32,
+    },
+    /// Движение мыши в режиме захвата ([`WindowHandle::set_mouse_capture`]): смещение в долях
+    /// клиентской области.
+    MouseDelta {
+        /// По горизонтали.
+        dx: f32,
+        /// По вертикали.
+        dy: f32,
+    },
+    /// Средняя кнопка мыши.
+    Middle {
+        /// Кнопка нажата.
+        down: bool,
+    },
+    /// Окно потеряло фокус клавиатуры (нажатые клавиши больше не придут отпусканием).
+    FocusLost,
     /// Пользователь закрывает окно.
     Close,
 }
+
+/// Сообщение окну: включить (`wParam` = 1) или выключить захват мыши.
+const WM_SET_CAPTURE: u32 = WM_APP + 1;
 
 /// Композитор выводит кадр с полями (letterbox); `false` — кадр растянут на всё окно
 /// (запасной путь без шейдеров). Ставит композитор, читает оконная процедура.
@@ -84,6 +112,20 @@ impl WindowHandle {
         // SAFETY: PostMessage безопасен для любого HWND; если окна уже нет, вернётся ошибка.
         let _ = unsafe { PostMessageW(Some(self.0), WM_CLOSE, WPARAM(0), LPARAM(0)) };
     }
+
+    /// Захват мыши (прицел): курсор скрыт и заперт в окне, движение приходит как
+    /// [`WindowEvent::MouseDelta`]. Можно звать из любого потока.
+    pub fn set_mouse_capture(self, on: bool) {
+        // SAFETY: PostMessage безопасен для любого HWND.
+        let _ = unsafe {
+            PostMessageW(
+                Some(self.0),
+                WM_SET_CAPTURE,
+                WPARAM(usize::from(on)),
+                LPARAM(0),
+            )
+        };
+    }
 }
 
 type Handler = Box<dyn FnMut(WindowEvent)>;
@@ -92,6 +134,43 @@ thread_local! {
     static HANDLER: RefCell<Option<Handler>> = const { RefCell::new(None) };
     /// Размер экрана гостя: по нему считаются поля (letterbox) для касаний.
     static GUEST_SIZE: Cell<(u32, u32)> = const { Cell::new((0, 0)) };
+    /// Захват мыши включён.
+    static CAPTURED: Cell<bool> = const { Cell::new(false) };
+}
+
+/// Центр клиентской области: в клиентских и экранных координатах.
+fn client_center(hwnd: HWND) -> ((i32, i32), POINT, (i32, i32)) {
+    let mut r = RECT::default();
+    // SAFETY: окно валидно, выходная структура локальная.
+    let _ = unsafe { GetClientRect(hwnd, &raw mut r) };
+    let (w, h) = ((r.right - r.left).max(1), (r.bottom - r.top).max(1));
+    let mut p = POINT { x: w / 2, y: h / 2 };
+    // SAFETY: окно валидно, точка локальная.
+    let _ = unsafe { ClientToScreen(hwnd, &raw mut p) };
+    ((w / 2, h / 2), p, (w, h))
+}
+
+/// Включает или выключает захват мыши (в UI-потоке).
+fn apply_capture(hwnd: HWND, on: bool) {
+    if CAPTURED.with(Cell::get) == on {
+        return;
+    }
+    CAPTURED.with(|c| c.set(on));
+    // SAFETY: управление курсором из UI-потока; счётчик ShowCursor меняется парно (on/off).
+    let _ = unsafe { ShowCursor(!on) };
+    if on {
+        let mut r = RECT::default();
+        // SAFETY: окно валидно, выходная структура локальная.
+        let _ = unsafe { GetWindowRect(hwnd, &raw mut r) };
+        // SAFETY: прямоугольник локальный и живёт до конца вызова.
+        let _ = unsafe { ClipCursor(Some(&raw const r)) };
+        let (_, p, _) = client_center(hwnd);
+        // SAFETY: перемещение курсора из UI-потока.
+        let _ = unsafe { SetCursorPos(p.x, p.y) };
+    } else {
+        // SAFETY: снятие ограничения курсора.
+        let _ = unsafe { ClipCursor(None) };
+    }
 }
 
 fn emit(e: WindowEvent) {
@@ -164,11 +243,42 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
             LRESULT(0)
         }
         WM_MOUSEMOVE => {
+            if CAPTURED.with(Cell::get) {
+                // Прицел: смещение от центра окна, курсор возвращается в центр.
+                let (x, y) = lparam_point(lparam);
+                let ((cx, cy), p, (w, h)) = client_center(hwnd);
+                if (x, y) != (cx, cy) {
+                    #[allow(clippy::cast_precision_loss, reason = "пиксели окна")]
+                    emit(WindowEvent::MouseDelta {
+                        dx: (x - cx) as f32 / w as f32,
+                        dy: (y - cy) as f32 / h as f32,
+                    });
+                    // SAFETY: перемещение курсора из UI-потока.
+                    let _ = unsafe { SetCursorPos(p.x, p.y) };
+                }
+                return LRESULT(0);
+            }
+            let (x, y) = client_point(hwnd, lparam);
+            emit(WindowEvent::Cursor { x, y });
             // MK_LBUTTON = 1: перемещение с нажатой кнопкой — движение пальца.
             if wparam.0 & 1 != 0 {
-                let (x, y) = client_point(hwnd, lparam);
                 emit(WindowEvent::Pointer { x, y, down: true });
             }
+            LRESULT(0)
+        }
+        WM_MBUTTONDOWN | WM_MBUTTONUP => {
+            emit(WindowEvent::Middle {
+                down: msg == WM_MBUTTONDOWN,
+            });
+            LRESULT(0)
+        }
+        WM_SET_CAPTURE => {
+            apply_capture(hwnd, wparam.0 != 0);
+            LRESULT(0)
+        }
+        WM_KILLFOCUS => {
+            apply_capture(hwnd, false);
+            emit(WindowEvent::FocusLost);
             LRESULT(0)
         }
         WM_LBUTTONUP => {

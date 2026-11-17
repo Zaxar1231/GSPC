@@ -40,6 +40,44 @@ pub fn linux_keycode(scancode: u16, extended: bool) -> Option<u16> {
     })
 }
 
+/// Имя клавиши для профилей управления (`"W"`, `"Space"`, `"LAlt"`, `"F1"`) по скан-коду набора 1.
+#[must_use]
+pub fn key_name(scancode: u16, extended: bool) -> Option<&'static str> {
+    #[rustfmt::skip]
+    const MAIN: [&str; 0x59] = [
+        "", "Escape", "1", "2", "3", "4", "5", "6", "7", "8", "9", "0", "Minus", "Equals",
+        "Backspace", "Tab", "Q", "W", "E", "R", "T", "Y", "U", "I", "O", "P", "LBracket",
+        "RBracket", "Enter", "LCtrl", "A", "S", "D", "F", "G", "H", "J", "K", "L", "Semicolon",
+        "Apostrophe", "Grave", "LShift", "Backslash", "Z", "X", "C", "V", "B", "N", "M", "Comma",
+        "Period", "Slash", "RShift", "NumMultiply", "LAlt", "Space", "CapsLock", "F1", "F2", "F3",
+        "F4", "F5", "F6", "F7", "F8", "F9", "F10", "NumLock", "ScrollLock", "Num7", "Num8",
+        "Num9", "NumMinus", "Num4", "Num5", "Num6", "NumPlus", "Num1", "Num2", "Num3", "Num0",
+        "NumDecimal", "", "", "", "F11", "F12",
+    ];
+    let sc = scancode & 0xFF;
+    let name = if extended {
+        match sc {
+            0x1C => "NumEnter",
+            0x1D => "RCtrl",
+            0x38 => "RAlt",
+            0x47 => "Home",
+            0x48 => "Up",
+            0x49 => "PageUp",
+            0x4B => "Left",
+            0x4D => "Right",
+            0x4F => "End",
+            0x50 => "Down",
+            0x51 => "PageDown",
+            0x52 => "Insert",
+            0x53 => "Delete",
+            _ => "",
+        }
+    } else {
+        MAIN.get(usize::from(sc)).copied().unwrap_or("")
+    };
+    (!name.is_empty()).then_some(name)
+}
+
 /// `KEY_BACK` — «Назад» в Android.
 pub const KEY_BACK: u16 = 158;
 /// `KEY_HOMEPAGE` — «Домой» в Android.
@@ -82,6 +120,19 @@ mod tests {
         assert_eq!(nav_shortcut(0x3D, false), Some(KEY_APPSELECT)); // F3
         assert_eq!(nav_shortcut(0x1E, false), None); // A
         assert_eq!(nav_shortcut(0x47, true), None); // Home (E0) — обычная клавиша
+    }
+
+    #[test]
+    fn key_names() {
+        assert_eq!(key_name(0x11, false), Some("W"));
+        assert_eq!(key_name(0x39, false), Some("Space"));
+        assert_eq!(key_name(0x38, false), Some("LAlt"));
+        assert_eq!(key_name(0x38, true), Some("RAlt"));
+        assert_eq!(key_name(0x3B, false), Some("F1"));
+        assert_eq!(key_name(0x58, false), Some("F12"));
+        assert_eq!(key_name(0x48, true), Some("Up"));
+        assert_eq!(key_name(0x54, false), None);
+        assert_eq!(key_name(0x11, true), None);
     }
 
     #[test]
