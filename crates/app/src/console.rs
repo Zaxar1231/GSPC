@@ -584,7 +584,11 @@ pub(crate) fn boot_android(args: &AndroidArgs) -> Result<()> {
             .map(|p| {
                 let data = std::fs::read(p)
                     .with_context(|| format!("не удалось прочитать APK {}", p.display()))?;
-                let name = p.file_name().unwrap_or_default().to_string_lossy().into_owned();
+                let name = p
+                    .file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .into_owned();
                 Ok((name, data))
             })
             .collect::<Result<Vec<_>>>()?;
@@ -639,10 +643,13 @@ fn install_apks(host: &rustdroid_devices::agent::AgentHost, apks: &[(String, Vec
         std::thread::sleep(Duration::from_millis(500));
     }
     for (name, data) in apks {
-        let outcome = host.install(name, data).map_err(|e| e.to_string()).and_then(|rx| {
-            rx.recv_timeout(Duration::from_secs(300))
-                .map_err(|_| "нет ответа агента за 5 мин".to_owned())
-        });
+        let outcome = host
+            .install(name, data)
+            .map_err(|e| e.to_string())
+            .and_then(|rx| {
+                rx.recv_timeout(Duration::from_secs(300))
+                    .map_err(|_| "нет ответа агента за 5 мин".to_owned())
+            });
         match outcome {
             Ok(o) if o.ok => tracing::info!(apk = %name, out = %o.message.trim(), "APK установлен"),
             Ok(o) => tracing::warn!(apk = %name, out = %o.message.trim(), "APK не установлен"),

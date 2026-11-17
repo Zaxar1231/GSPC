@@ -143,7 +143,14 @@ pub fn run(
         }
 
         let overlay_ref = if cfg.overlay {
-            fill_overlay(&mut overlay, &mut stats, &mut latency, &usage, &times, false);
+            fill_overlay(
+                &mut overlay,
+                &mut stats,
+                &mut latency,
+                &usage,
+                &times,
+                false,
+            );
             Some(&overlay)
         } else {
             None

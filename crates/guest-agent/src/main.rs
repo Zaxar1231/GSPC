@@ -16,7 +16,9 @@ fn main() -> ExitCode {
     // Демон: связь с хостом оборвалась или не установилась — пробуем снова.
     #[cfg(any(target_os = "linux", target_os = "android"))]
     loop {
-        let e = linux::run().err().unwrap_or_else(|| "хост закрыл соединение".to_owned());
+        let e = linux::run()
+            .err()
+            .unwrap_or_else(|| "хост закрыл соединение".to_owned());
         #[allow(clippy::print_stderr, reason = "агент — демон, журнал — stderr")]
         {
             eprintln!("rustdroid-agent: {e}; повтор через 2 с");
