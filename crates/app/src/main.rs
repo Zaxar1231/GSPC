@@ -18,8 +18,6 @@ mod controls;
 #[cfg(windows)]
 mod crash;
 #[cfg(windows)]
-mod update;
-#[cfg(windows)]
 mod display;
 #[cfg(windows)]
 mod gpu_probe;
@@ -29,6 +27,8 @@ mod hostnet;
 mod preflight;
 #[cfg_attr(not(windows), allow(dead_code))]
 mod pulse;
+#[cfg(windows)]
+mod update;
 
 use anyhow::Result;
 use clap::Parser;

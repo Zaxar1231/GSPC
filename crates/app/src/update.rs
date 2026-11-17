@@ -30,13 +30,19 @@ pub(crate) fn run(check: bool, rollback: bool) -> Result<()> {
         (Found::UpToDate, _) if rollback => tracing::info!(current, "предыдущей версии нет"),
         (Found::UpToDate, _) => tracing::info!(current, "установлена последняя версия"),
         (Found::Version(v), true) => tracing::info!(current, available = %v, "есть обновление"),
-        (Found::Version(v), false) => tracing::info!(current, version = %v, "ставлю и перезапускаю"),
+        (Found::Version(v), false) => {
+            tracing::info!(current, version = %v, "ставлю и перезапускаю")
+        }
     }
     Ok(())
 }
 
 fn health_file() -> Option<PathBuf> {
-    Some(PathBuf::from(std::env::var_os("LOCALAPPDATA")?).join("RustDroid").join("health.txt"))
+    Some(
+        PathBuf::from(std::env::var_os("LOCALAPPDATA")?)
+            .join("RustDroid")
+            .join("health.txt"),
+    )
 }
 
 /// Запуск ВМ у установленной копии: учёт «здоровья», откат после повторных сбоев новой
@@ -61,8 +67,7 @@ pub(crate) fn on_start() {
             starts = health.failed_starts,
             "новая версия раз за разом не запускается — возвращаю предыдущую"
         );
-        match rustdroid_updater::manager(Some(current.clone())).map(|m| rustdroid_updater::apply(&m))
-        {
+        match rustdroid_updater::manager(Some(current)).map(|m| rustdroid_updater::apply(&m)) {
             Some(Ok(Found::Version(_))) => return,
             Some(Ok(Found::UpToDate)) | None => tracing::warn!("предыдущей версии в фиде нет"),
             Some(Err(e)) => tracing::warn!(error = %e, "откат не удался"),
