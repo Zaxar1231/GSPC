@@ -254,6 +254,8 @@ impl Profile {
     /// # Errors
     /// Неверный JSON или версия новее [`VERSION`].
     pub fn from_json(text: &str) -> Result<Self, ProfileError> {
+        // Блокнот и PowerShell 5.1 сохраняют UTF-8 с BOM, serde_json его не принимает.
+        let text = text.strip_prefix('\u{feff}').unwrap_or(text);
         let p: Self = serde_json::from_str(text).map_err(ProfileError::Json)?;
         if p.version > VERSION {
             return Err(ProfileError::TooNew(p.version));
@@ -320,5 +322,6 @@ mod tests {
             Err(ProfileError::TooNew(2))
         ));
         assert!(Profile::from_json("{").is_err());
+        assert!(Profile::from_json("\u{feff}{\"version\":1,\"name\":\"x\",\"controls\":[]}").is_ok());
     }
 }
