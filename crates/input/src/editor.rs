@@ -356,7 +356,10 @@ mod tests {
         e.handle(EditEvent::Key("Q"));
         assert_eq!(e.markers()[1].label, "Q");
         e.handle(EditEvent::Key("Escape"));
-        assert!(!e.handle(EditEvent::Key("Z")), "без выбора и места — ничего");
+        assert!(
+            !e.handle(EditEvent::Key("Z")),
+            "без выбора и места — ничего"
+        );
         e.handle(EditEvent::Press { x: 0.2, y: 0.2 });
         e.handle(EditEvent::Key("Delete"));
         assert_eq!(e.profile().controls, vec![tap("Q", 0.8, 0.8)]);
