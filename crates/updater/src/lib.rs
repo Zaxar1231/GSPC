@@ -51,12 +51,20 @@ impl SignedSource {
         }
     }
 
+    /// Скачивает файл фида; при обрыве соединения — ещё до двух попыток.
     fn fetch(&self, name: &str) -> Result<Vec<u8>, Error> {
         let url = format!("{}/{name}", self.base);
-        let mut resp = ureq::get(&url).call()?;
-        resp.body_mut()
-            .read_to_vec()
-            .map_err(|e| Error::Other(format!("{url}: {e}")))
+        let mut last = None;
+        for attempt in 0..3_u64 {
+            if attempt > 0 {
+                std::thread::sleep(std::time::Duration::from_secs(attempt));
+            }
+            match ureq::get(&url).call().and_then(|mut r| r.body_mut().read_to_vec()) {
+                Ok(body) => return Ok(body),
+                Err(e) => last = Some(e),
+            }
+        }
+        Err(last.map_or_else(|| Error::Other(url), Error::from))
     }
 }
 
