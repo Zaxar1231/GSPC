@@ -13,6 +13,7 @@ use anyhow::{Context, Result};
 use rustdroid_devices::TouchState;
 use rustdroid_devices::agent::AgentHost;
 use rustdroid_input::editor::{EditEvent, Editor};
+use rustdroid_input::gamepad::{self, PadState};
 use rustdroid_input::keymap::{HostEvent, Keymap, TouchOp};
 use rustdroid_input::profile::{Orientation, Profile, VERSION};
 use rustdroid_present::run::{Marker, Markers};
@@ -25,6 +26,10 @@ use crate::cli::VmArgs;
 const FOREGROUND_EVERY: Duration = Duration::from_secs(1);
 /// Самый долгий сон потока движка (захват мыши включается не позже).
 const IDLE_SLEEP: Duration = Duration::from_millis(20);
+/// Опрос подключённого геймпада.
+const PAD_EVERY: Duration = Duration::from_millis(8);
+/// Проверка, не подключили ли геймпад (`XInputGetState` без устройства медленный).
+const PAD_PROBE: Duration = Duration::from_secs(1);
 /// Куда сохранить новый профиль, если не заданы ни `--profile`, ни `--profiles`.
 const FALLBACK_FILE: &str = "rustdroid.rdprofile";
 
@@ -300,6 +305,26 @@ impl Controls {
         self.markers.set(marks);
     }
 
+    /// Изменения геймпада между опросами → события профиля (кнопки `Pad*`, стики).
+    fn pad(&self, prev: PadState, cur: PadState) {
+        if self.editing() {
+            return;
+        }
+        for (name, pressed) in gamepad::buttons(prev, cur) {
+            self.handle(HostEvent::Key { name, pressed });
+        }
+        for (name, now, before) in [
+            (gamepad::LEFT_STICK, (cur.lx, cur.ly), (prev.lx, prev.ly)),
+            (gamepad::RIGHT_STICK, (cur.rx, cur.ry), (prev.rx, prev.ry)),
+        ] {
+            let (x, y) = gamepad::stick(now.0, now.1);
+            // Отпущенный стик — одно событие (0, 0), а не поток.
+            if (x, y) != (0.0, 0.0) || gamepad::stick(before.0, before.1) != (0.0, 0.0) {
+                self.handle(HostEvent::Stick { name, x, y });
+            }
+        }
+    }
+
     /// Активное приложение гостя сменилось: другой профиль — старый отпускает пальцы.
     fn set_package(&self, package: String) {
         let mut out = Vec::new();
@@ -349,6 +374,8 @@ impl Controls {
             .spawn(move || {
                 let mut captured = false;
                 let mut next_fg = Instant::now();
+                let (mut pad_prev, mut pad_on, mut pad_probe) =
+                    (PadState::default(), false, Instant::now());
                 loop {
                     let now = self.now_ms();
                     let mut out = Vec::new();
@@ -374,14 +401,47 @@ impl Controls {
                         next_fg = Instant::now() + FOREGROUND_EVERY;
                         self.set_package(agent.foreground());
                     }
-                    let sleep = deadline.map_or(IDLE_SLEEP, |d| {
-                        Duration::from_millis(d.saturating_sub(self.now_ms())).min(IDLE_SLEEP)
+                    if pad_on || Instant::now() >= pad_probe {
+                        let cur = read_pad();
+                        if cur.is_none() {
+                            pad_probe = Instant::now() + PAD_PROBE;
+                        }
+                        let cur_or_idle = cur.unwrap_or_default();
+                        if pad_on || cur.is_some() {
+                            self.pad(pad_prev, cur_or_idle);
+                        }
+                        pad_prev = cur_or_idle;
+                        pad_on = cur.is_some();
+                    }
+                    let idle = if pad_on { PAD_EVERY } else { IDLE_SLEEP };
+                    let sleep = deadline.map_or(idle, |d| {
+                        Duration::from_millis(d.saturating_sub(self.now_ms())).min(idle)
                     });
                     std::thread::sleep(sleep);
                 }
             })?;
         Ok(())
     }
+}
+
+/// Состояние геймпада 0 (XInput); `None` — не подключён.
+fn read_pad() -> Option<PadState> {
+    use windows::Win32::UI::Input::XboxController::{XINPUT_STATE, XInputGetState};
+    let mut st = XINPUT_STATE::default();
+    // SAFETY: выходная структура локальная.
+    if unsafe { XInputGetState(0, &raw mut st) } != 0 {
+        return None;
+    }
+    let g = st.Gamepad;
+    Some(PadState {
+        buttons: g.wButtons.0,
+        lt: g.bLeftTrigger,
+        rt: g.bRightTrigger,
+        lx: g.sThumbLX,
+        ly: g.sThumbLY,
+        rx: g.sThumbRX,
+        ry: g.sThumbRY,
+    })
 }
 
 /// Метки редактора для композитора.

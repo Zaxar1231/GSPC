@@ -9,6 +9,7 @@
 //! редактор профиля поверх игры (этап 6).
 
 pub mod editor;
+pub mod gamepad;
 pub mod geometry;
 pub mod keymap;
 pub mod keys;

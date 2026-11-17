@@ -100,6 +100,9 @@ pub enum Control {
         y: f32,
         /// Радиус (доля высоты экрана).
         radius: f32,
+        /// Стик геймпада (`PadLeftStick` / `PadRightStick`), плавно управляющий контролом.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        stick: Option<String>,
     },
     /// Прицел: клавиша включает захват мыши, движение мыши тянет палец.
     Aim {
@@ -115,6 +118,9 @@ pub enum Control {
         /// Инвертировать вертикаль.
         #[serde(default)]
         invert_y: bool,
+        /// Стик геймпада (`PadLeftStick` / `PadRightStick`), плавно управляющий контролом.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        stick: Option<String>,
     },
     /// Касание, пока клавиша нажата и прицел включён (выстрел).
     Shoot {

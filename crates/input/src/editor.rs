@@ -378,6 +378,7 @@ mod tests {
                 x: 0.2,
                 y: 0.7,
                 radius: 0.1,
+                stick: None,
             },
             Control::Swipe {
                 key: "Space".into(),

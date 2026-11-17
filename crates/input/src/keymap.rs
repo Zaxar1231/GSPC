@@ -27,6 +27,8 @@ const ZOOM_START: f32 = 0.1;
 const AIM_REACH: f32 = 0.2;
 /// Курсор на таком расстоянии от центра экрана (доля высоты) — скилл MOBA на полном радиусе.
 const MOBA_FULL: f32 = 0.3;
+/// Сдвиг пальца прицела за одно событие стика при полном отклонении (опрос ~8 мс).
+const AIM_STICK_SPEED: f32 = 0.01;
 
 /// Событие ввода хоста.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -56,6 +58,16 @@ pub enum HostEvent<'a> {
     Wheel {
         /// Щелчки.
         notches: f32,
+    },
+    /// Стик геймпада (`PadLeftStick` / `PadRightStick`): отклонение −1…1, ось Y — вниз;
+    /// `(0, 0)` — стик отпущен.
+    Stick {
+        /// Имя стика.
+        name: &'a str,
+        /// По горизонтали.
+        x: f32,
+        /// По вертикали.
+        y: f32,
     },
 }
 
@@ -174,6 +186,7 @@ impl Keymap {
                 false
             }
             HostEvent::Wheel { notches } => self.wheel(notches, now_ms),
+            HostEvent::Stick { name, x, y } => self.stick(name, x, y, out),
         }
     }
 
@@ -499,9 +512,76 @@ impl Keymap {
     }
 
     fn mouse_move(&mut self, dx: f32, dy: f32, out: &mut Vec<TouchOp>) -> bool {
-        if !self.aim {
-            return false;
+        self.aim && self.aim_drag(dx, dy, out)
+    }
+
+    fn stick(&mut self, name: &str, sx: f32, sy: f32, out: &mut Vec<TouchOp>) -> bool {
+        let mut used = false;
+        for i in 0..self.profile.controls.len() {
+            let Some(c) = self.profile.controls.get(i).cloned() else {
+                continue;
+            };
+            match c {
+                Control::Joystick {
+                    x,
+                    y,
+                    radius,
+                    stick: Some(s),
+                    ..
+                } if s.eq_ignore_ascii_case(name) => {
+                    used = true;
+                    let (dirs, finger) = match self.states[i] {
+                        State::Stick(d, f) => (d, f),
+                        _ => ([false; 4], None),
+                    };
+                    let finger = if sx == 0.0 && sy == 0.0 {
+                        // Стик отпущен: палец остаётся, только если зажаты клавиши направлений.
+                        if dirs.iter().any(|d| *d) {
+                            finger
+                        } else {
+                            if let Some(slot) = finger {
+                                self.put(slot, out);
+                            }
+                            None
+                        }
+                    } else {
+                        let slot = match finger {
+                            Some(s) => Some(s),
+                            None => self.alloc().inspect(|&slot| {
+                                out.push(TouchOp::Down {
+                                    slot,
+                                    at: NormPoint::new(x, y),
+                                });
+                            }),
+                        };
+                        if let Some(slot) = slot {
+                            out.push(TouchOp::Move {
+                                slot,
+                                at: NormPoint::new(x + sx * radius / self.aspect, y + sy * radius),
+                            });
+                        }
+                        slot
+                    };
+                    self.states[i] = State::Stick(dirs, finger);
+                }
+                Control::Aim { stick: Some(s), .. } if s.eq_ignore_ascii_case(name) => {
+                    used = true;
+                    if sx == 0.0 && sy == 0.0 {
+                        if let Some((slot, _, _)) = self.aim_finger.take() {
+                            self.put(slot, out);
+                        }
+                    } else {
+                        self.aim_drag(sx * AIM_STICK_SPEED, sy * AIM_STICK_SPEED, out);
+                    }
+                }
+                _ => {}
+            }
         }
+        used
+    }
+
+    /// Тянет палец прицела на `dx, dy` (мышь при включённом прицеле или правый стик).
+    fn aim_drag(&mut self, dx: f32, dy: f32, out: &mut Vec<TouchOp>) -> bool {
         let Some(Control::Aim {
             x,
             y,
@@ -785,6 +865,7 @@ mod tests {
             x: 0.2,
             y: 0.7,
             radius: 0.1,
+            stick: None,
         }]);
         // Радиус в долях высоты: по горизонтали на экране 2:1 — вдвое меньше.
         same!(
@@ -809,6 +890,7 @@ mod tests {
                 y: 0.5,
                 sensitivity: Sensitivity { x: 1.0, y: 1.0 },
                 invert_y: false,
+                stick: None,
             },
             Control::Shoot {
                 key: "LButton".into(),
@@ -962,6 +1044,48 @@ mod tests {
         assert!(used);
         same!(out, [mv(2, 0.9, 0.2), up(2)]);
         same!(key(&mut k, "1", false, 30).1, []);
+    }
+
+    #[test]
+    fn gamepad_sticks_drive_joystick_and_aim() {
+        let mut k = map(vec![
+            Control::Joystick {
+                keys: JoystickKeys {
+                    up: "W".into(),
+                    left: "A".into(),
+                    down: "S".into(),
+                    right: "D".into(),
+                },
+                x: 0.2,
+                y: 0.7,
+                radius: 0.1,
+                stick: Some("PadLeftStick".into()),
+            },
+            Control::Aim {
+                toggle_key: "LAlt".into(),
+                x: 0.6,
+                y: 0.5,
+                sensitivity: Sensitivity { x: 1.0, y: 1.0 },
+                invert_y: false,
+                stick: Some("PadRightStick".into()),
+            },
+        ]);
+        let mut out = Vec::new();
+        let ev = |name: &'static str, x: f32, y: f32| HostEvent::Stick { name, x, y };
+        assert!(k.handle(ev("PadLeftStick", 0.5, 0.0), 0, &mut out));
+        same!(out, [down(2, 0.2, 0.7), mv(2, 0.225, 0.7)]);
+        out.clear();
+        k.handle(ev("PadLeftStick", 0.0, 0.0), 8, &mut out);
+        same!(out, [up(2)]);
+        // Правый стик тянет палец прицела без захвата мыши.
+        out.clear();
+        assert!(k.handle(ev("PadRightStick", 1.0, 0.0), 16, &mut out));
+        same!(out, [down(2, 0.6, 0.5), mv(2, 0.61, 0.5)]);
+        assert!(!k.captures_mouse());
+        out.clear();
+        k.handle(ev("PadRightStick", 0.0, 0.0), 24, &mut out);
+        same!(out, [up(2)]);
+        assert!(!k.handle(ev("Other", 1.0, 1.0), 32, &mut out));
     }
 
     #[test]
