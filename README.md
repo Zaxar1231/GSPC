@@ -1,6 +1,6 @@
 <div align="center">
 
-# pisun
+# PiSun
 
 **Android-эмулятор для игр на Windows 11, написанный с нуля на Rust.**
 Свой гипервизор поверх Windows Hypervisor Platform, virtio-устройства, D3D12-вывод без копий,
