@@ -19,7 +19,12 @@ use velopack::{Error, UpdateCheck, UpdateManager, UpdateOptions, VelopackAsset, 
 pub const FEED_URL: &str = "https://github.com/Zaxar1231/GSPC/releases/download/updates";
 
 /// Открытый ключ ed25519 подписи фида (закрытый — секрет CI `UPDATE_SIGNING_KEY`).
-pub const PUBLIC_KEY: [u8; 32] = [0; 32];
+pub const PUBLIC_KEY: [u8; 32] = [
+    0x10, 0x07, 0xa1, 0xa6, 0x58, 0xeb, 0x99, 0x6c,
+    0xd6, 0x18, 0x18, 0x42, 0xec, 0xc8, 0x1e, 0xbc,
+    0x85, 0x87, 0x10, 0x01, 0xac, 0x99, 0x32, 0x65,
+    0xe0, 0xd8, 0x9a, 0x1a, 0x8e, 0xd9, 0x09, 0xe2,
+];
 
 /// Столько неудачных запусков новой версии подряд — и она откатывается.
 pub const MAX_FAILED_STARTS: u32 = 3;
