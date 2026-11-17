@@ -87,7 +87,7 @@ fn check_hypervisor() -> Vec<Check> {
         Err(WhpxError::LibraryNotFound(_)) => vec![Check::Fail {
             problem: "компонент Windows Hypervisor Platform не включён".into(),
             fix: "PowerShell от администратора: Enable-WindowsOptionalFeature -Online -FeatureName \
-                  HypervisorPlatform -All, затем перезагрузка.",
+                  HypervisorPlatform -All (или `rustdroid enable-whpx`), затем перезагрузка.",
         }],
         Err(e) => vec![Check::Fail {
             problem: e.to_string(),

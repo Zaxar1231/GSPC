@@ -574,6 +574,10 @@ pub(crate) fn boot_android(args: &AndroidArgs) -> Result<()> {
         })
         .collect();
 
+    if !args.vm.no_auto_update {
+        crate::update::on_start();
+    }
+
     // Служба агента гостя на vsock: активное приложение и установка APK (этап 5).
     let outbox = VsockOutbox::new();
     let (agent, agent_host) = rustdroid_devices::agent::new(Arc::clone(&outbox));

@@ -25,6 +25,17 @@ pub(crate) enum Command {
     Boot(BootArgs),
     /// Загрузить Android из каталога образов Cuttlefish x86_64.
     BootAndroid(AndroidArgs),
+    /// Обновить RustDroid (установленную через Setup.exe копию) из своего канала (stable/beta).
+    Update {
+        /// Только проверить, есть ли обновление.
+        #[arg(long)]
+        check: bool,
+        /// Вернуть предыдущую версию.
+        #[arg(long, conflicts_with = "check")]
+        rollback: bool,
+    },
+    /// Включить Windows Hypervisor Platform (запросит права администратора; нужна перезагрузка).
+    EnableWhpx,
     /// Проверка 3D (Vulkan и gfxstream) в отдельном процессе; её запускает `check`.
     #[command(hide = true)]
     GpuProbe {
@@ -139,6 +150,11 @@ pub(crate) struct VmArgs {
     /// (`package`) на переднем плане (по данным гостевого агента).
     #[arg(long)]
     pub profiles: Option<std::path::PathBuf>,
+
+    /// Не скачивать обновление в фоне (по умолчанию установленная копия скачивает его при
+    /// запуске, применится при следующем).
+    #[arg(long)]
+    pub no_auto_update: bool,
 
     /// Сеть гостя: `user` — virtio-net с NAT в пользовательском режиме (интернет через сеть
     /// хоста без драйверов и прав администратора), `none` — без сети.

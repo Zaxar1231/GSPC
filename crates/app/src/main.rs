@@ -18,6 +18,8 @@ mod controls;
 #[cfg(windows)]
 mod crash;
 #[cfg(windows)]
+mod update;
+#[cfg(windows)]
 mod display;
 #[cfg(windows)]
 mod gpu_probe;
@@ -49,6 +51,9 @@ pub static NvOptimusEnablement: u32 = 1;
 pub static AmdPowerXpressRequestHighPerformance: i32 = 1;
 
 fn main() -> Result<()> {
+    // Хуки установщика Velopack (установка, удаление, первый запуск) и применение скачанного
+    // обновления — до разбора аргументов: с аргументами хуков программа сразу завершается.
+    velopack::VelopackApp::build().run();
     let cli = Cli::parse();
     init_tracing(cli.verbose);
     #[cfg(windows)]
@@ -78,6 +83,8 @@ fn run(command: Command, verbose: u8) -> Result<()> {
     match command {
         Command::Check => preflight::run(verbose),
         Command::GpuProbe { gl } => gpu_probe::run(gl),
+        Command::Update { check, rollback } => update::run(check, rollback),
+        Command::EnableWhpx => update::enable_whpx(),
         Command::Boot(args) => console::boot(&args),
         Command::BootAndroid(args) => console::boot_android(&args),
     }

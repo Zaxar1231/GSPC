@@ -17,6 +17,8 @@ path = "src/main.rs"
 
 [dependencies]
 anyhow.workspace = true
+rustdroid-updater.workspace = true
+velopack.workspace = true
 clap.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
@@ -43,6 +45,7 @@ windows = { workspace = true, features = [
     "Win32_System_SystemInformation",
     "Win32_System_Threading",
     "Win32_UI_Input_XboxController",
+    "Win32_UI_Shell",
 ] }
 
 [lints]

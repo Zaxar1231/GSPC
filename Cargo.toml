@@ -61,6 +61,10 @@ windows = { version = "0.62", default-features = false, features = ["std"] }
 vm-superio = "0.8"
 
 sha2 = "0.11"
+# Обновления (этап 7): Velopack; ring и ureq приходят с ним же (rustls), подпись фида — ring.
+velopack = { version = "1.2.161", features = ["public-utils"] }
+ring = "0.17"
+ureq = "3"
 crc32fast = "1.5"
 clap = { version = "4", features = ["derive"] }
 

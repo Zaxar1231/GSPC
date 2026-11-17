@@ -29,6 +29,26 @@ jobs:
         run: rustup toolchain install
       - run: cargo fmt --all -- --check
 
+  # Cargo.lock должен соответствовать Cargo.toml (остальные задачи собирают с --locked).
+  # Если устарел — обновлённый файл в артефакте `Cargo.lock` (локального cargo может не быть).
+  lockfile:
+    name: Cargo.lock
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+      - run: rustup toolchain install
+      - name: Cargo.lock актуален
+        shell: pwsh
+        run: |
+          cargo metadata --format-version 1 > $null
+          git diff --exit-code -- Cargo.lock
+      - name: Обновлённый Cargo.lock
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: Cargo.lock
+          path: Cargo.lock
+
   clippy:
     name: clippy
     runs-on: windows-latest
