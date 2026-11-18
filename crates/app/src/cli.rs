@@ -125,6 +125,11 @@ pub(crate) struct VmArgs {
     #[arg(long)]
     pub agent: Option<std::path::PathBuf>,
 
+    /// Профиль управления (`.rdprofile`): клавиши, мышь и колесо окна превращаются в касания
+    /// гостя. Без флага окно передаёт клавиатуру и мышь как есть.
+    #[arg(long)]
+    pub profile: Option<PathBuf>,
+
     /// Сеть гостя: `user` — virtio-net с NAT в пользовательском режиме (интернет через сеть
     /// хоста без драйверов и прав администратора), `none` — без сети.
     #[arg(long, value_enum, default_value_t = NetMode::None)]

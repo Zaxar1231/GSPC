@@ -19,9 +19,9 @@ use windows::Win32::UI::WindowsAndMessaging::{
     DestroyWindow, DispatchMessageW, GetClientRect, GetMessageW, IDC_ARROW, LoadCursorW, MSG,
     PostMessageW, PostQuitMessage, RegisterClassExW, SPI_GETWORKAREA, SW_SHOW,
     SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS, ShowWindow, SystemParametersInfoW, TranslateMessage,
-    WHEEL_DELTA, WM_CLOSE, WM_DESTROY, WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDOWN, WM_LBUTTONUP,
-    WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SYSKEYDOWN, WM_SYSKEYUP,
-    WNDCLASSEXW, WS_EX_APPWINDOW, WS_OVERLAPPEDWINDOW,
+    WHEEL_DELTA, WM_CLOSE, WM_DESTROY, WM_KEYDOWN, WM_KEYUP, WM_KILLFOCUS, WM_LBUTTONDOWN,
+    WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SYSKEYDOWN,
+    WM_SYSKEYUP, WNDCLASSEXW, WS_EX_APPWINDOW, WS_OVERLAPPEDWINDOW,
 };
 use windows::core::{PCWSTR, w};
 
@@ -62,6 +62,15 @@ pub enum WindowEvent {
         /// Щелчки колеса (`WHEEL_DELTA` = 1), бывают дробными у точных колёс и тачпадов.
         notches: f32,
     },
+    /// Курсор над окном (без нажатых кнопок): доли экрана гостя. Нужен прицелу и скиллам.
+    Hover {
+        /// X.
+        x: f32,
+        /// Y.
+        y: f32,
+    },
+    /// Окно потеряло фокус: нажатые клавиши и касания нужно отпустить.
+    FocusLost,
     /// Пользователь закрывает окно.
     Close,
 }
@@ -164,11 +173,16 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
             LRESULT(0)
         }
         WM_MOUSEMOVE => {
+            let (x, y) = client_point(hwnd, lparam);
+            emit(WindowEvent::Hover { x, y });
             // MK_LBUTTON = 1: перемещение с нажатой кнопкой — движение пальца.
             if wparam.0 & 1 != 0 {
-                let (x, y) = client_point(hwnd, lparam);
                 emit(WindowEvent::Pointer { x, y, down: true });
             }
+            LRESULT(0)
+        }
+        WM_KILLFOCUS => {
+            emit(WindowEvent::FocusLost);
             LRESULT(0)
         }
         WM_LBUTTONUP => {

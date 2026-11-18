@@ -8,7 +8,7 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver};
 use std::sync::{Arc, Mutex, PoisonError};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use rustdroid_devices::input::key_events;
@@ -17,10 +17,12 @@ use rustdroid_gfxstream::{Config as GfxConfig, ffi::flags as gfx_flags};
 use rustdroid_gpu::gfxstream::GfxstreamBackend;
 use rustdroid_gpu::{DisplayMode, FenceSink, Mailbox};
 use rustdroid_input::keys::{KEY_BACK, linux_keycode, nav_shortcut};
+use rustdroid_input::profile::key_name;
+use rustdroid_input::{Engine, NormPoint, Out, Profile};
 use rustdroid_present::d3d12::PresentMode;
 use rustdroid_present::run::PresentConfig;
 use rustdroid_present::window::{self, WindowEvent};
-use rustdroid_vmm::{ExitStats, RunOutcome, Vm, VmDevices};
+use rustdroid_vmm::{ExitStats, InputHandle, RunOutcome, Vm, VmDevices};
 
 use crate::cli::{DisplaySpec, GpuMode, VmArgs};
 
@@ -194,6 +196,88 @@ fn to_panel(frac: f32, size: u32) -> u32 {
 
 /// Слот мультитача левой кнопки мыши.
 const MOUSE_SLOT: u32 = 0;
+/// Шаг потока профиля управления (повторы, свайпы, макросы), мс.
+const KEYMAP_TICK_MS: u64 = 5;
+
+/// Читает профиль управления и строит движок.
+fn load_engine(path: &std::path::Path) -> Result<Engine> {
+    let text = std::fs::read_to_string(path)
+        .with_context(|| format!("не удалось прочитать профиль {}", path.display()))?;
+    let profile = Profile::from_json(&text)
+        .map_err(|e| anyhow::anyhow!("профиль {}: {e}", path.display()))?;
+    tracing::info!(name = %profile.name, controls = profile.controls.len(), "профиль управления");
+    Engine::new(&profile).map_err(|e| anyhow::anyhow!("профиль {}: {e}", path.display()))
+}
+
+/// Отправляет гостю касания, которые выдал движок. Вызывать, держа блокировку движка: порядок
+/// событий (отпускание слота раньше его повторного нажатия) сохраняется только так.
+fn apply(out: &[Out], state: &Mutex<TouchState>, touch: &InputHandle, w: u32, h: u32) {
+    if out.is_empty() {
+        return;
+    }
+    let mut st = state.lock().unwrap_or_else(PoisonError::into_inner);
+    let mut events = Vec::new();
+    for o in out {
+        match *o {
+            Out::Down { slot, at } | Out::Move { slot, at } => {
+                events.extend(st.touch(slot, to_panel(at.x(), w), to_panel(at.y(), h)));
+            }
+            Out::Up { slot } => events.extend(st.release(slot)),
+        }
+    }
+    drop(st);
+    if !events.is_empty() {
+        touch.push(&events);
+    }
+}
+
+/// Опрос первого геймпада (XInput): изменения кнопок идут в движок по назначению профиля.
+#[cfg(windows)]
+fn pad_loop(
+    eng: &Mutex<Engine>,
+    state: &Mutex<TouchState>,
+    touch: &InputHandle,
+    w: u32,
+    h: u32,
+    stop: &AtomicBool,
+    t0: Instant,
+) {
+    use windows::Win32::UI::Input::XboxController::{XINPUT_STATE, XInputGetState};
+    let mut prev = 0u16;
+    while !stop.load(Ordering::Acquire) {
+        std::thread::sleep(Duration::from_millis(KEYMAP_TICK_MS));
+        let mut pad = XINPUT_STATE::default();
+        // SAFETY: XInputGetState пишет в структуру `pad`, живую на время вызова.
+        let rc = unsafe { XInputGetState(0, &raw mut pad) };
+        if rc != 0 {
+            // Геймпада нет (или он отключён): отпускать уже нечего.
+            prev = 0;
+            continue;
+        }
+        let now = pad.Gamepad.wButtons.0;
+        for (name, pressed) in rustdroid_input::gamepad::changes(prev, now) {
+            drive(eng, state, touch, w, h, |g, o| {
+                g.pad_event(name, pressed, t0.elapsed(), o)
+            });
+        }
+        prev = now;
+    }
+}
+
+/// Выполняет `f` над движком и отправляет результат гостю.
+fn drive(
+    eng: &Mutex<Engine>,
+    state: &Mutex<TouchState>,
+    touch: &InputHandle,
+    w: u32,
+    h: u32,
+    f: impl FnOnce(&mut Engine, &mut Vec<Out>),
+) {
+    let mut g = eng.lock().unwrap_or_else(PoisonError::into_inner);
+    let mut out = Vec::new();
+    f(&mut g, &mut out);
+    apply(&out, state, touch, w, h);
+}
 /// Слот «пальца» прокрутки колесом: отдельный, чтобы не мешать нажатой кнопке.
 const WHEEL_SLOT: u32 = 1;
 
@@ -239,6 +323,32 @@ pub(crate) fn run(machine: Vm, screen: Screen, vm: &VmArgs) -> Result<(RunOutcom
     let (w, h) = (screen.spec.width, screen.spec.height);
 
     let touch_state = Arc::new(Mutex::new(TouchState::default()));
+    let stop = Arc::new(AtomicBool::new(false));
+    let t0 = Instant::now();
+    let engine: Option<Arc<Mutex<Engine>>> = match vm.profile.as_deref() {
+        Some(path) => Some(Arc::new(Mutex::new(load_engine(path)?))),
+        None => None,
+    };
+    if let (Some(eng), Some(t)) = (engine.clone(), touch.clone()) {
+        let (state, stop_flag) = (Arc::clone(&touch_state), Arc::clone(&stop));
+        std::thread::Builder::new()
+            .name("keymap".into())
+            .spawn(move || {
+                while !stop_flag.load(Ordering::Acquire) {
+                    std::thread::sleep(Duration::from_millis(KEYMAP_TICK_MS));
+                    drive(&eng, &state, &t, w, h, |g, o| g.tick(t0.elapsed(), o));
+                }
+            })
+            .context("не удалось запустить поток профиля управления")?;
+        #[cfg(windows)]
+        if let (Some(eng), Some(t)) = (engine.clone(), touch.clone()) {
+            let (state, stop_flag) = (Arc::clone(&touch_state), Arc::clone(&stop));
+            std::thread::Builder::new()
+                .name("gamepad".into())
+                .spawn(move || pad_loop(&eng, &state, &t, w, h, &stop_flag, t0))
+                .context("не удалось запустить поток геймпада")?;
+        }
+    }
     let wheel = touch.clone().and_then(|t| {
         let (tx, rx) = mpsc::channel();
         let state = Arc::clone(&touch_state);
@@ -250,7 +360,7 @@ pub(crate) fn run(machine: Vm, screen: Screen, vm: &VmArgs) -> Result<(RunOutcom
             .map(|_| tx)
     });
     let close_stopper = stopper.clone();
-    let handler = move |e: WindowEvent| match e {
+    let handler = move |ev: WindowEvent| match ev {
         WindowEvent::Pointer { x, y, down } => {
             if let Some(t) = &touch {
                 let mut st = touch_state.lock().unwrap_or_else(PoisonError::into_inner);
@@ -264,9 +374,45 @@ pub(crate) fn run(machine: Vm, screen: Screen, vm: &VmArgs) -> Result<(RunOutcom
                     t.push(&events);
                 }
             }
+            if let (Some(eng), Some(t)) = (&engine, &touch) {
+                drive(eng, &touch_state, t, w, h, |g, o| {
+                    g.key_event("LButton", down, t0.elapsed(), o);
+                });
+            }
+        }
+        WindowEvent::Hover { x, y } => {
+            if let (Some(eng), Some(t)) = (&engine, &touch) {
+                drive(eng, &touch_state, t, w, h, |g, o| {
+                    g.pointer(NormPoint::new(x, y), o);
+                });
+            }
+        }
+        WindowEvent::FocusLost => {
+            if let Some(t) = &touch {
+                let mut st = touch_state.lock().unwrap_or_else(PoisonError::into_inner);
+                let events = st.release(MOUSE_SLOT);
+                drop(st);
+                if !events.is_empty() {
+                    t.push(&events);
+                }
+            }
+            if let (Some(eng), Some(t)) = (&engine, &touch) {
+                drive(eng, &touch_state, t, w, h, |g, o| g.release_all(o));
+            }
         }
         WindowEvent::Wheel { x, y, notches } => {
-            if let Some(tx) = &wheel {
+            let zoom = engine.as_ref().is_some_and(|eng| {
+                eng.lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .has_zoom()
+            });
+            if zoom {
+                if let (Some(eng), Some(t)) = (&engine, &touch) {
+                    drive(eng, &touch_state, t, w, h, |g, o| {
+                        g.wheel(notches, t0.elapsed(), o);
+                    });
+                }
+            } else if let Some(tx) = &wheel {
                 let _ = tx.send((x, y, notches));
             }
         }
@@ -275,6 +421,20 @@ pub(crate) fn run(machine: Vm, screen: Screen, vm: &VmArgs) -> Result<(RunOutcom
             extended,
             pressed,
         } => {
+            // Клавиша, назначенная профилем, гостю не уходит.
+            let name = if extended { None } else { key_name(scancode) };
+            if let (Some(eng), Some(t), Some(n)) = (&engine, &touch, name) {
+                let bound = eng
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .binds_key(n);
+                if bound {
+                    drive(eng, &touch_state, t, w, h, |g, o| {
+                        g.key_event(n, pressed, t0.elapsed(), o);
+                    });
+                    return;
+                }
+            }
             // Esc/F2/F3 — «Назад»/«Домой»/«Недавние»: у образа нет кнопок навигации на экране.
             let code =
                 nav_shortcut(scancode, extended).or_else(|| linux_keycode(scancode, extended));
@@ -283,6 +443,11 @@ pub(crate) fn run(machine: Vm, screen: Screen, vm: &VmArgs) -> Result<(RunOutcom
             }
         }
         WindowEvent::Secondary { down } => {
+            if let (Some(eng), Some(t)) = (&engine, &touch) {
+                drive(eng, &touch_state, t, w, h, |g, o| {
+                    g.key_event("RButton", down, t0.elapsed(), o);
+                });
+            }
             if let Some(k) = &keyboard {
                 k.push(&key_events(KEY_BACK, down));
             }
@@ -292,7 +457,6 @@ pub(crate) fn run(machine: Vm, screen: Screen, vm: &VmArgs) -> Result<(RunOutcom
     let title = format!("RustDroid — {w}x{h} @ {} Гц", screen.spec.refresh_hz);
     let win = window::create(&title, w, h, handler).context("не удалось создать окно")?;
 
-    let stop = Arc::new(AtomicBool::new(false));
     let cfg = PresentConfig {
         mode: if vm.no_vsync {
             PresentMode::Immediate

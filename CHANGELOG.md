@@ -10,6 +10,11 @@
 
 ### Added
 
+- Управление (этап 6, `docs/stage-6.md`): формат профиля v1 (`rustdroid-input::profile`) и
+  движок (`rustdroid-input::engine`) с контролами tap, hold/toggle, repeat, swipe, joystick,
+  aim, shoot, zoom, macro и moba_skill; кнопки геймпада по назначению профиля; набор профилей с
+  выбором по пакету. Флаг `boot-android --profile PATH`. Не проверено на железе; без
+  редактора и стиков геймпада.
 - Доставка гостевого агента через консоль гостя: `boot-android --agent PATH` шлёт бинарник в
   `/data/local/tmp` кусками base64 и запускает его в фоне. Не проверено на железе; по умолчанию
   выключено.
