@@ -38,7 +38,7 @@ jobs:
           git -C gfxstream checkout --quiet FETCH_HEAD
           git -C gfxstream log -1 --format='%H %cd %s'
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           path: rustdroid
           sparse-checkout: third_party/gfxstream-patches
@@ -90,7 +90,7 @@ jobs:
           }
           "sha256 $hash"
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: gfxstream-windows-x64
           path: |

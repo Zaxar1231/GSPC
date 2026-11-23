@@ -21,7 +21,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Цель Android для Rust
         run: rustup target add x86_64-linux-android
@@ -42,7 +42,7 @@ jobs:
           sha256sum out/rustdroid-agent | tee out/rustdroid-agent.sha256
           echo "built-from=${GITHUB_SHA}" > out/build.txt
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: rustdroid-agent-x86_64-android
           path: out/
