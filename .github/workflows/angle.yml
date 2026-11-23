@@ -28,7 +28,7 @@ jobs:
     runs-on: windows-latest
     timeout-minutes: 150
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           path: rustdroid
           sparse-checkout: third_party/vcpkg-triplets
@@ -88,7 +88,7 @@ jobs:
             Write-Warning 'PDB ANGLE не найдены'
           }
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: angle-windows-x64
           path: ${{ runner.temp }}/angle-windows-x64*.zip
