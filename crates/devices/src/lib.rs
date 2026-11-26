@@ -9,7 +9,7 @@
 //! | virtio-input   | мультитач (протокол B) и клавиатура ([`input`])          | 3    |
 //! | virtio-net     | user-mode NAT (`rustdroid-net`), без TAP и прав админа  | 5    |
 //! | virtio-vsock   | служебный канал хост↔гость ([`vsock`])                   | 3/5  |
-//! | virtio-snd     | звук через WASAPI                                       | 9    |
+//! | virtio-snd     | вывод звука ([`snd`]), WASAPI — 9.3                     | 9    |
 //!
 //! virtio-gpu вынесен в отдельный крейт `rustdroid-gpu`.
 
@@ -22,6 +22,7 @@ pub mod input;
 pub mod net;
 pub mod rtc;
 pub mod serial;
+pub mod snd;
 pub mod vsock;
 
 pub use blk::VirtioBlk;
@@ -33,4 +34,5 @@ pub use input::{InputEvent, InputEvents, InputKind, TouchState, VirtioInput};
 pub use net::{NatBackend, NetBackend, NetWake, VirtioNet};
 pub use rtc::CmosRtc;
 pub use serial::{InterruptLine, Serial16550};
+pub use snd::{NullSink, PcmSink, VirtioSnd};
 pub use vsock::{VirtioVsock, VsockOutbox, VsockService};

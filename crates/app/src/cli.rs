@@ -130,6 +130,10 @@ pub(crate) struct VmArgs {
     #[arg(long, value_enum, default_value_t = NetMode::None)]
     pub net: NetMode,
 
+    /// Звуковая карта virtio-snd. Пока звук отбрасывается: вывод через WASAPI — этап 9.3.
+    #[arg(long)]
+    pub sound: bool,
+
     /// Выводить без VSync (tearing; для VRR/G-Sync/FreeSync).
     #[arg(long)]
     pub no_vsync: bool,

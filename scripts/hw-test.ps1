@@ -50,6 +50,10 @@
     Этап 3 без сетевой карты (по умолчанию у гостя virtio-net с NAT в пользовательском режиме,
     --net user). В отчёт попадает диагностика сети гостя (stage3-net.txt).
 
+.PARAMETER NoSound
+    Этап 3 без звуковой карты (по умолчанию у гостя virtio-snd, --sound; звук пока
+    отбрасывается). В отчёт попадает диагностика звука гостя (stage3-snd.txt).
+
 .PARAMETER KeepInstance
     Этап 3 без сброса инстанса: повторный запуск Android с сохранёнными данными и кэшами
     шейдеров (проверка статтеров при повторном запуске). По умолчанию инстанс сбрасывается.
@@ -73,6 +77,7 @@ param(
     [switch]$KeepInstance,
     [switch]$NoUpload,
     [switch]$NoNet,
+    [switch]$NoSound,
     [string]$Append = '',
     [ValidateSet('auto', 'gfxstream', 'gfxstream-gl', 'software')]
     [string]$Gpu = 'auto',
@@ -659,6 +664,7 @@ if ($Stages -contains 3 -and $images -and (Test-Path $Exe)) {
         "stage3 append: $Append" | Add-Content -Path (Join-Path $Out 'system.txt') -Encoding UTF8
     }
     if (-not $NoNet) { $stage3Args += @('--net', 'user') }
+    if (-not $NoSound) { $stage3Args += '--sound' }
     if ($KeepInstance) { "stage3 instance: kept" | Add-Content -Path (Join-Path $Out 'system.txt') -Encoding UTF8 }
     # Профиль гостя: после загрузки shell на консоли раз в 10 с печатает top (строки с «TOP »).
     $guestTop = 'while [ "$(getprop sys.boot_completed)" != 1 ]; do sleep 5; done; sleep 15; ' +
@@ -713,6 +719,18 @@ if ($Stages -contains 3 -and $images -and (Test-Path $Exe)) {
             Ok 'stage3: диагностика сети гостя в stage3-net.txt'
         } else {
             Warn 'stage3: нет диагностики сети из консоли гостя'
+        }
+    }
+    # Звук гостя (этап 9.1): видит ли Android карту virtio-snd (SNDDIAG из консоли гостя).
+    if (-not $NoSound) {
+        $snddiag = Select-String -Path $serial -Pattern 'SNDDIAG ' -SimpleMatch -Encoding UTF8 -ErrorAction SilentlyContinue
+        if ($snddiag) {
+            $sndLines = $snddiag | ForEach-Object { $_.Line -replace '^.*?SNDDIAG ', '' }
+            $sndLines | Set-Content (Join-Path $Out 'stage3-snd.txt') -Encoding UTF8
+            if ($sndLines -match 'virtio_snd|VirtIO') { Ok 'stage3: гость видит звуковую карту virtio-snd (stage3-snd.txt)' }
+            else { Warn 'stage3: гость не видит virtio-snd — см. stage3-snd.txt (нет драйвера в ядре?)' }
+        } else {
+            Warn 'stage3: нет диагностики звука из консоли гостя'
         }
     }
     # Профиль: загрузка CPU по потокам и время команд virtio-gpu (раз в 10 с).

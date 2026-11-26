@@ -7,9 +7,9 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use rustdroid_devices::{
-    CmosRtc, ConsoleInput, Disk, InputEvent, InputEvents, InputKind, NetBackend, NetWake,
-    Serial16550, VirtioBlk, VirtioConsole, VirtioInput, VirtioNet, VirtioVsock, VsockOutbox,
-    VsockService,
+    CmosRtc, ConsoleInput, Disk, InputEvent, InputEvents, InputKind, NetBackend, NetWake, PcmSink,
+    Serial16550, VirtioBlk, VirtioConsole, VirtioInput, VirtioNet, VirtioSnd, VirtioVsock,
+    VsockOutbox, VsockService,
 };
 use rustdroid_gpu::backend::ShmMapper;
 use rustdroid_gpu::{Backend3d, DisplayMode, FenceSink, Mailbox, VirtioGpu};
@@ -98,6 +98,8 @@ pub struct VmDevices {
     pub inputs: Vec<(InputKind, String, Arc<InputEvents>)>,
     /// virtio-net: сетевой бэкенд и его будильник очереди приёма. Без него сетевой карты нет.
     pub net: Option<(Box<dyn NetBackend>, Arc<NetWake>)>,
+    /// virtio-snd: вывод звука хоста. Без него звуковой карты нет.
+    pub sound: Option<Box<dyn PcmSink>>,
 }
 
 impl std::fmt::Debug for VmDevices {
@@ -117,6 +119,7 @@ impl std::fmt::Debug for VmDevices {
             .field("gpu", &self.gpu.as_ref().map(|(m, _)| *m))
             .field("inputs", &self.inputs.len())
             .field("net", &self.net.is_some())
+            .field("sound", &self.sound.is_some())
             .finish()
     }
 }
@@ -576,6 +579,10 @@ impl Vm {
             )?;
             net_wake = Some(wake);
             tracing::info!("virtio-net (NAT в пользовательском режиме)");
+        }
+        if let Some(sink) = devices.sound {
+            add("snd".into(), Box::new(VirtioSnd::new(sink)))?;
+            tracing::info!("virtio-snd (вывод звука)");
         }
         let pci = Arc::new(pci);
 

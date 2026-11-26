@@ -174,6 +174,7 @@ impl VirtioPci {
             crate::device::TYPE_GPU => 0x03_80_00,   // display, other
             crate::device::TYPE_INPUT => 0x09_80_00, // input, other
             crate::device::TYPE_VSOCK => 0x07_80_00, // communication, other
+            crate::device::TYPE_SOUND => 0x04_01_00, // multimedia, audio
             _ => 0xFF_00_00,
         };
         let c = &mut self.config;

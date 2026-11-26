@@ -15,6 +15,8 @@ pub const TYPE_GPU: u32 = 16;
 pub const TYPE_INPUT: u32 = 18;
 /// Тип устройства virtio-vsock.
 pub const TYPE_VSOCK: u32 = 19;
+/// Тип устройства virtio-snd.
+pub const TYPE_SOUND: u32 = 25;
 
 /// Возможность: устройство соответствует virtio 1.x.
 pub const VIRTIO_F_VERSION_1: u64 = 1 << 32;

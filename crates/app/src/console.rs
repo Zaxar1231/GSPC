@@ -323,6 +323,14 @@ grep -n -B1 -A6 eth0 /vendor/etc/init/init.cutf_cvm.rc; echo '--- connect 1.1.1.
 printf 'GET / HTTP/1.0\\r\\n\\r\\n' | timeout 10 toybox nc -w 5 1.1.1.1 80 | head -3; \
 echo '--- end'; } </dev/null 2>&1 | sed 's/^/NETDIAG /') &\n";
 
+/// Диагностика звука гостя при `--sound`: через 40 с после загрузки пишет в консоль строки
+/// `SNDDIAG …` — звуковые карты ALSA, устройства `/dev/snd`, драйверы virtio и свойства звука
+/// (этап 9.1: какой драйвер у образа и видит ли он virtio-snd).
+const SND_DIAG: &str = "(sleep 40; { echo '--- cards'; cat /proc/asound/cards; echo '--- pcm'; \
+cat /proc/asound/pcm; echo '--- dev'; ls -l /dev/snd; echo '--- virtio drivers'; \
+ls /sys/bus/virtio/drivers; echo '--- props'; getprop | grep -iE 'audio|snd'; \
+echo '--- end'; } </dev/null 2>&1 | sed 's/^/SNDDIAG /') &\n";
+
 /// Отдаёт `script` shell на консоли гостя через [`GUEST_SETUP_DELAY`].
 fn spawn_guest_setup(console: ConsoleHandle, script: String) -> std::io::Result<()> {
     std::thread::Builder::new()
@@ -347,6 +355,9 @@ fn run_vm(
     }
     if vm.net == NetMode::User {
         devices.net = Some(crate::hostnet::user_net()?);
+    }
+    if vm.sound {
+        devices.sound = Some(Box::new(rustdroid_devices::NullSink));
     }
     let display = vm
         .display
@@ -606,6 +617,9 @@ pub(crate) fn boot_android(args: &AndroidArgs) -> Result<()> {
         if args.vm.net == NetMode::User {
             script.push_str(NET_FIX);
             script.push_str(NET_DIAG);
+        }
+        if args.vm.sound {
+            script.push_str(SND_DIAG);
         }
         if let Some(agent) = &agent_script {
             script.push_str(agent);
