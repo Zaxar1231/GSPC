@@ -581,6 +581,7 @@ dependencies = [
 name = "rustdroid-vmm"
 version = "0.0.1"
 dependencies = [
+ "crc32fast",
  "rustdroid-devices",
  "rustdroid-gpu",
  "rustdroid-virtio",

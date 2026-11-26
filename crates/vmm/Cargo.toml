@@ -14,6 +14,7 @@ rustdroid-devices.workspace = true
 rustdroid-gpu.workspace = true
 rustdroid-virtio.workspace = true
 rustdroid-whpx.workspace = true
+crc32fast.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 

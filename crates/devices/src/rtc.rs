@@ -146,6 +146,32 @@ impl CmosRtc {
         }
     }
 
+    /// Размер состояния для снапшота: индекс и NVRAM.
+    pub const STATE_SIZE: usize = 129;
+
+    /// Состояние для снапшота. Время не сохраняется: после восстановления RTC снова берёт его
+    /// у часов хоста.
+    #[must_use]
+    pub fn save_state(&self) -> [u8; Self::STATE_SIZE] {
+        let mut b = [0u8; Self::STATE_SIZE];
+        b[0] = self.index;
+        b[1..].copy_from_slice(&self.nvram);
+        b
+    }
+
+    /// Восстанавливает состояние из [`Self::save_state`]; `false` — неверный размер.
+    pub fn restore_state(&mut self, b: &[u8]) -> bool {
+        let Some((&index, nvram)) = b.split_first() else {
+            return false;
+        };
+        if nvram.len() != self.nvram.len() {
+            return false;
+        }
+        self.index = index & 0x7F;
+        self.nvram.copy_from_slice(nvram);
+        true
+    }
+
     /// Запись в порт `0x70`/`0x71`.
     pub fn write(&mut self, port: u16, value: u8) {
         match port {

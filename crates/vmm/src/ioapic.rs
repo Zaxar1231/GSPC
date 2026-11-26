@@ -75,6 +75,37 @@ impl IoApic {
         }
     }
 
+    /// Размер состояния для снапшота: ID, выбранный регистр и таблица переадресации.
+    pub const STATE_SIZE: usize = 1 + 4 + NUM_PINS * 8;
+
+    /// Состояние для снапшота.
+    #[must_use]
+    pub fn save_state(&self) -> Vec<u8> {
+        let mut b = Vec::with_capacity(Self::STATE_SIZE);
+        b.push(self.id);
+        b.extend_from_slice(&self.select.to_le_bytes());
+        for r in &self.redirect {
+            b.extend_from_slice(&r.to_le_bytes());
+        }
+        b
+    }
+
+    /// Восстанавливает состояние из [`Self::save_state`]; `false` — неверный размер.
+    pub fn restore_state(&mut self, b: &[u8]) -> bool {
+        if b.len() != Self::STATE_SIZE {
+            return false;
+        }
+        let (head, table) = b.split_at(5);
+        let mut select = [0u8; 4];
+        select.copy_from_slice(&head[1..5]);
+        self.id = head[0];
+        self.select = u32::from_le_bytes(select) & 0xFF;
+        for (r, chunk) in self.redirect.iter_mut().zip(table.as_chunks::<8>().0) {
+            *r = u64::from_le_bytes(*chunk);
+        }
+        true
+    }
+
     fn read_register(&self, reg: u32) -> u32 {
         #[allow(
             clippy::cast_possible_truncation,

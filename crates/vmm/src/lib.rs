@@ -26,6 +26,7 @@ pub mod loader;
 pub mod memory;
 pub mod pci;
 pub mod platform;
+pub mod snapshot;
 
 #[cfg(windows)]
 pub mod host;
